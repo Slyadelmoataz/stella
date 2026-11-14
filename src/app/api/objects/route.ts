@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { IRSA_USER_AGENT } from "@/lib/nativeHttpsGet";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -12,6 +13,7 @@ const TAP_ENDPOINTS = [
 ];
 
 const MAX_RESULTS = 40;
+const EDGE_CACHE_CONTROL = "public, s-maxage=86400, stale-while-revalidate=604800";
 
 type TapResponse = {
   data?: unknown[][];
@@ -73,7 +75,7 @@ ORDER BY DISTANCE(POINT('ICRS', ra, dec), POINT('ICRS', ${ra}, ${dec}))`;
     tapUrl.searchParams.set("query", adql);
 
     const response = await fetch(tapUrl, {
-      headers: { Accept: "application/json" },
+      headers: { Accept: "application/json", "User-Agent": IRSA_USER_AGENT },
       signal: AbortSignal.timeout(12_000),
       cache: "no-store",
     });
@@ -104,7 +106,7 @@ ORDER BY DISTANCE(POINT('ICRS', ra, dec), POINT('ICRS', ${ra}, ${dec}))`;
 
   try {
     const objects = await Promise.any(tapRequests);
-    return NextResponse.json(objects);
+    return NextResponse.json(objects, { headers: { "Cache-Control": EDGE_CACHE_CONTROL } });
   } catch (error) {
     const failures = error instanceof AggregateError ? error.errors : [];
     const timedOut = failures.some((failure) => failure instanceof Error && failure.name === "TimeoutError");

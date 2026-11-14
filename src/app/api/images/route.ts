@@ -12,6 +12,7 @@ export const maxDuration = 60;
 
 const SIA_ENDPOINT = "https://irsa.ipac.caltech.edu/SIA";
 const IRSA_HOST = "irsa.ipac.caltech.edu";
+const EDGE_CACHE_CONTROL = "public, s-maxage=86400, stale-while-revalidate=604800";
 setDefaultResultOrder("ipv4first");
 
 /** Convert decimal degrees or sexagesimal input to decimal degrees. */
@@ -270,18 +271,20 @@ async function fetchTimeSeriesRecords(ra: number, dec: number, size: number) {
   const search = async (dataSet: "neowiser" | "allsky", table: "p1bm_frm" | "4band_p1bm_frm") => {
     const searchUrl = new URL(`/ibe/search/wise/${dataSet}/${table}`, `https://${IRSA_HOST}`);
     searchUrl.searchParams.set("POS", `${ra},${dec}`);
-    searchUrl.searchParams.set("SIZE", String(size));
-    searchUrl.searchParams.set("INTERSECT", "OVERLAPS");
+    // Only ask the archive for exposures containing the target coordinate.
+    // The FITS cutout step below still requests the full display field.
+    searchUrl.searchParams.set("SIZE", "0");
+    searchUrl.searchParams.set("INTERSECT", "CENTER");
     searchUrl.searchParams.set("where", dataSet === "allsky"
       ? "qual_frame>0 and mjd_obs between 55197 and 55700"
-      : "qual_frame>0 and mjd_obs between 56600 and 60700");
+      : "qual_frame>0 and band in (1,2) and mjd_obs between 56600 and 60700");
     searchUrl.searchParams.set("columns", "scan_id,frame_num,band,mjd_obs,qual_frame");
     // Omit FORMAT: IBE defaults to matching rows; FORMAT=METADATA returns only
     // the schema. The response encoding is `ct`, not SIA's RESPONSEFORMAT.
     searchUrl.searchParams.set("ct", "CSV");
     const response = await nativeHttpsGet(searchUrl, {
       allowedHosts: [IRSA_HOST],
-      timeoutMs: 30_000,
+      timeoutMs: 6_000,
       maxBytes: 32 * 1024 * 1024,
       headers: { Accept: "text/csv" },
     });
@@ -297,10 +300,18 @@ async function fetchTimeSeriesRecords(ra: number, dec: number, size: number) {
     return { rows, rawCsv };
   };
 
-  const [neowiserResult, allskyResult] = await Promise.allSettled([
-    search("neowiser", "p1bm_frm"),
-    search("allsky", "4band_p1bm_frm"),
-  ]);
+  const settleSearch = async (dataSet: "neowiser" | "allsky", table: "p1bm_frm" | "4band_p1bm_frm") => {
+    try {
+      return { status: "fulfilled" as const, value: await search(dataSet, table) };
+    } catch (reason) {
+      return { status: "rejected" as const, reason };
+    }
+  };
+  // Query one catalog at a time: shared Vercel egress can overwhelm IRSA when
+  // both spatial searches are issued concurrently.
+  const neowiserResult = await settleSearch("neowiser", "p1bm_frm");
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  const allskyResult = await settleSearch("allsky", "4band_p1bm_frm");
   const neowiser = neowiserResult.status === "fulfilled" ? neowiserResult.value : null;
   const allsky = allskyResult.status === "fulfilled" ? allskyResult.value : null;
   const errors = [
@@ -434,12 +445,12 @@ export async function GET(request: NextRequest) {
   const collection = mode === "spherex" ? "spherex_dr1_cube" : mode === "timeseries" ? "wise_neowiser_p1bm_frm+wise_allsky_4band_p1bm_frm" : "wise_allwise";
   const cacheKey = irsaQueryCacheKey(JSON.stringify({ version: 6, mode, collection, ra, dec, size }));
   const cached = mode === "timeseries" ? null : await readIrsaJsonCache<{ wiseImages?: ImageRecord[]; spherexImages?: unknown[]; spherexCube?: SpherexCubeRecord | null; source?: string; error?: string }>(cacheKey);
-  if (cached && mode !== "timeseries") return NextResponse.json(cached, { headers: { "X-IRSA-Cache": "HIT" } });
+  if (cached && mode !== "timeseries") return NextResponse.json(cached, { headers: { "X-IRSA-Cache": "HIT", "Cache-Control": EDGE_CACHE_CONTROL } });
 
   if (mode === "timeseries") {
     try {
       const cachedPayload = await readTimeSeriesCache(ra, dec, size);
-      if (cachedPayload) return NextResponse.json(cachedPayload, { headers: { "X-IRSA-Cache": "HIT" } });
+      if (cachedPayload) return NextResponse.json(cachedPayload, { headers: { "X-IRSA-Cache": "HIT", "Cache-Control": cachedPayload.failureSummary.length ? "no-store" : EDGE_CACHE_CONTROL } });
 
       const jobKey = `${ra.toFixed(4)}:${dec.toFixed(4)}:${size}`;
       let job = timeSeriesJobs.get(jobKey);
@@ -453,7 +464,7 @@ export async function GET(request: NextRequest) {
         timeSeriesJobs.set(jobKey, job);
       }
       const payload = await job;
-      return NextResponse.json(payload, { status: 200, headers: { "X-IRSA-Cache": "MISS" } });
+      return NextResponse.json(payload, { status: 200, headers: { "X-IRSA-Cache": "MISS", "Cache-Control": payload.failureSummary.length ? "no-store" : EDGE_CACHE_CONTROL } });
     } catch (error) {
       console.error("[timeseries error]", error);
       const message = error instanceof Error && error.name === "TimeoutError"
@@ -467,7 +478,7 @@ export async function GET(request: NextRequest) {
         failureSummary: [],
         source: "unavailable",
         error: message,
-      }, { status: 200, headers: { "X-IRSA-Cache": "MISS" } });
+      }, { status: 200, headers: { "X-IRSA-Cache": "MISS", "Cache-Control": "no-store" } });
     }
   }
 
@@ -486,18 +497,18 @@ export async function GET(request: NextRequest) {
       spherexCubeError,
     };
     if (!spherexCubeError) await writeIrsaJsonCache(cacheKey, payload);
-    return NextResponse.json(payload, { headers: { "X-IRSA-Cache": "MISS" } });
+    return NextResponse.json(payload, { headers: { "X-IRSA-Cache": "MISS", "Cache-Control": spherexCubeError ? "no-store" : EDGE_CACHE_CONTROL } });
   }
 
   try {
     const wiseImages = await fetchWiseRecords(ra, dec, size);
     const payload = { wiseImages, source: "IRSA AllWISE Atlas" };
     await writeIrsaJsonCache(cacheKey, payload);
-    return NextResponse.json(payload, { headers: { "X-IRSA-Cache": "MISS" } });
+    return NextResponse.json(payload, { headers: { "X-IRSA-Cache": "MISS", "Cache-Control": EDGE_CACHE_CONTROL } });
   } catch (error) {
     const message = error instanceof Error && error.name === "TimeoutError"
       ? "IRSA WISE search timed out after 20 seconds."
       : error instanceof Error ? error.message : "Could not retrieve WISE image frames from IRSA.";
-    return NextResponse.json({ error: message }, { status: 502, headers: { "X-IRSA-Cache": "MISS" } });
+    return NextResponse.json({ error: message }, { status: 502, headers: { "X-IRSA-Cache": "MISS", "Cache-Control": "no-store" } });
   }
 }

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { IRSA_USER_AGENT } from "@/lib/nativeHttpsGet";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -60,7 +61,7 @@ async function rangeFetch(url: string, start: number, end: number, signal: Abort
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const response = await fetch(url, {
-        headers: { Range: `bytes=${start}-${end}`, "User-Agent": "SpaceApps-AstroViewer-Hackathon/1.0 (Dev)" },
+        headers: { Accept: "application/fits, application/octet-stream", Range: `bytes=${start}-${end}`, "User-Agent": IRSA_USER_AGENT },
         signal,
         cache: "no-store",
       });

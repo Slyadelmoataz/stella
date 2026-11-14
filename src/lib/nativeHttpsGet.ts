@@ -4,6 +4,7 @@ import type { IncomingHttpHeaders } from "node:http";
 // Reuse TLS connections for IRSA's many small FITS cutouts. Four sockets keep
 // throughput predictable without opening a large burst against the archive.
 const irsaAgent = new https.Agent({ keepAlive: true, maxSockets: 4, maxFreeSockets: 4, scheduling: "lifo" });
+export const IRSA_USER_AGENT = "Stella-AstroViewer/1.0 (NASA-SpaceApps; Next.js)";
 
 export type NativeHttpsResponse = {
   statusCode: number;
@@ -38,7 +39,12 @@ export function nativeHttpsGet(input: string | URL, options: HttpsGetOptions): P
       agent: irsaAgent,
       family: 4,
       timeout: timeoutMs,
-      headers: options.headers,
+      headers: {
+        ...(allowedHosts.has("irsa.ipac.caltech.edu")
+          ? { Accept: "*/*", "User-Agent": IRSA_USER_AGENT }
+          : {}),
+        ...options.headers,
+      },
     }, (response) => {
       const statusCode = response.statusCode ?? 0;
       const location = response.headers.location;

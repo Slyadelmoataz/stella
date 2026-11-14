@@ -16,7 +16,7 @@ export async function GET(request: NextRequest) {
       const cached = await readFitsCache(key);
       if (!cached) return NextResponse.json({ error: "This FITS image is not in the local cache." }, { status: 404 });
       return new NextResponse(cached, {
-        headers: { "Content-Type": "application/fits", "Cache-Control": "private, max-age=31536000", "Content-Length": String(cached.byteLength) },
+        headers: { "Content-Type": "application/fits", "Cache-Control": "public, s-maxage=86400, stale-while-revalidate=604800", "Content-Length": String(cached.byteLength) },
       });
     } catch {
       return NextResponse.json({ error: "The FITS cache key is invalid." }, { status: 400 });
@@ -51,7 +51,7 @@ export async function GET(request: NextRequest) {
     const cached = await readFitsCache(cacheKey);
     if (cached) {
       return new NextResponse(cached, {
-        headers: { "Content-Type": "application/fits", "Cache-Control": "private, max-age=31536000", "Content-Length": String(cached.byteLength) },
+        headers: { "Content-Type": "application/fits", "Cache-Control": "public, s-maxage=86400, stale-while-revalidate=604800", "Content-Length": String(cached.byteLength) },
       });
     }
 
@@ -65,7 +65,7 @@ export async function GET(request: NextRequest) {
           maxBytes: MAX_FITS_BYTES,
           headers: {
             Accept: "application/fits, application/octet-stream",
-            "User-Agent": "SpaceApps-AstroViewer-Hackathon/1.0 (Dev)",
+            "User-Agent": "Stella-AstroViewer/1.0 (NASA-SpaceApps; Next.js)",
           },
         });
         if (response.statusCode >= 200 && response.statusCode < 300) {
@@ -104,7 +104,7 @@ export async function GET(request: NextRequest) {
       status: 200,
       headers: {
         "Content-Type": "application/fits",
-        "Cache-Control": "private, max-age=31536000",
+        "Cache-Control": "public, s-maxage=86400, stale-while-revalidate=604800",
         "Content-Length": String(fitsData.byteLength),
       },
     });
