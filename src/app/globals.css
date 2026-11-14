@@ -281,8 +281,12 @@ body { background:#000; color:#E2E8F0; font-family:Arial,Helvetica,sans-serif; }
 .time-range-footer,.time-range-values,.pair-tool-controls { color:#82909c; font:9px ui-monospace,SFMono-Regular,monospace; font-variant-numeric:tabular-nums; }
 .image-blinker-controls { min-height:30px; padding:0 10px; }
 .image-blinker-limit { display:none; }
-.spectrum-panel { display:flex; flex:0 0 192px; flex-direction:column; height:192px; min-height:0; overflow:hidden; border-top:1px solid #1E242B; background:#0B0E14; }
+.spectrum-panel { display:flex; flex:0 0 var(--spectrum-height,192px); flex-direction:column; height:var(--spectrum-height,192px); min-height:0; overflow:hidden; border-top:1px solid #1E242B; background:#0B0E14; }
 .spectrum-panel.is-collapsed { flex-basis:38px; height:38px; }
+.spectrum-panel.is-collapsed .spectrum-resize-handle { display:none; }
+.spectrum-resize-handle { display:grid; flex:0 0 8px; place-items:center; margin-top:-1px; border-top:1px solid #1E242B; background:#0B0E14; cursor:row-resize; touch-action:none; user-select:none; }
+.spectrum-resize-handle span { width:32px; height:2px; border-radius:2px; background:#53616e; }
+.spectrum-resize-handle:hover span,.spectrum-resize-handle:focus-visible span { background:#38BDF8; }
 .spectrum-heading { flex:0 0 auto; min-height:38px; padding:5px 10px; }
 .spectrum-heading h3 { color:#d6e2eb; font-size:10px; letter-spacing:.04em; }
 .spectrum-heading p { margin:2px 0 0; color:#71808e; font-size:9px; }
@@ -307,7 +311,7 @@ body { background:#000; color:#E2E8F0; font-family:Arial,Helvetica,sans-serif; }
 .inspector-content input[type="checkbox"] { accent-color:#38BDF8; }
 .source-modal,.source-modal header,.source-modal footer { border-radius:3px; }
 @media (max-width:900px) { .sidebar.inspector-rail { flex-basis:280px; width:280px; } .telemetry-readout { gap:8px; font-size:9px; } .topbar-mode-tabs button { padding:0 6px; font-size:9px; } }
-@media (max-width:680px) { .workbench-topbar { gap:7px; padding:0 7px; }.workbench-topbar .brand small,.telemetry-idle { display:none; }.telemetry-readout { justify-content:flex-start; gap:6px; overflow:hidden; font-size:8px; }.telemetry-readout span:nth-child(2),.telemetry-readout span:nth-child(3) { display:none; }.topbar-mode-tabs button { max-width:78px; padding:0 4px; font-size:8px; }.workbench-main { flex-direction:column; }.sidebar.inspector-rail { flex:0 0 34vh; width:100%; border-top:1px solid #1E242B; border-left:0; }.viewport-title { flex-basis:34px; }.spectrum-panel { flex-basis:150px; height:150px; }.shared-epoch-controls { gap:5px; padding:4px 6px; }.shared-epoch-controls > span { flex-basis:90px; font-size:8px; }.shared-epoch-controls small { display:none; } }
+@media (max-width:680px) { .workbench-topbar { gap:7px; padding:0 7px; }.workbench-topbar .brand small,.telemetry-idle { display:none; }.telemetry-readout { justify-content:flex-start; gap:6px; overflow:hidden; font-size:8px; }.telemetry-readout span:nth-child(2),.telemetry-readout span:nth-child(3) { display:none; }.topbar-mode-tabs button { max-width:78px; padding:0 4px; font-size:8px; }.workbench-main { flex-direction:column; }.sidebar.inspector-rail { flex:0 0 34vh; width:100%; border-top:1px solid #1E242B; border-left:0; }.viewport-title { flex-basis:34px; }.spectrum-panel { flex-basis:var(--spectrum-height,150px); height:var(--spectrum-height,150px); }.shared-epoch-controls { gap:5px; padding:4px 6px; }.shared-epoch-controls > span { flex-basis:90px; font-size:8px; }.shared-epoch-controls small { display:none; } }
 
 /* Responsive workbench: preserve a useful image area before auxiliary tools. */
 html, body { min-width:320px; }
@@ -387,7 +391,7 @@ button, input, select, summary { -webkit-tap-highlight-color:transparent; }
 }
 
 @media (max-height:720px) and (min-width:681px) {
-  .spectrum-panel { flex-basis:148px; height:148px; }
+  .spectrum-panel { flex-basis:var(--spectrum-height,148px); height:var(--spectrum-height,148px); }
   .spectrum-panel.is-collapsed { flex-basis:36px; height:36px; }
   .viewport-title { flex-basis:36px; }
   .band-window-selector { min-height:32px; }
