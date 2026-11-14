@@ -452,8 +452,17 @@ export async function GET(request: NextRequest) {
 
   if (mode === "timeseries") {
     try {
+      const requestedMaxRec = Number(searchParams.get("maxrec"));
+      const limitManifest = (payload: TimeSeriesPayload): TimeSeriesPayload => {
+        if (!Number.isInteger(requestedMaxRec) || requestedMaxRec < 1) return payload;
+        const limit = Math.min(requestedMaxRec, 12);
+        return { ...payload, images: payload.images.slice(0, limit), total: Math.min(payload.total, limit) };
+      };
       const cachedPayload = await readTimeSeriesCache(ra, dec, size);
-      if (cachedPayload) return NextResponse.json(cachedPayload, { headers: { "X-IRSA-Cache": "HIT", "Cache-Control": cachedPayload.failureSummary.length ? "no-store" : EDGE_CACHE_CONTROL } });
+      if (cachedPayload) {
+        const limited = limitManifest(cachedPayload);
+        return NextResponse.json(limited, { headers: { "X-IRSA-Cache": "HIT", "Cache-Control": limited.failureSummary.length ? "no-store" : EDGE_CACHE_CONTROL } });
+      }
 
       const jobKey = `${ra.toFixed(4)}:${dec.toFixed(4)}:${size}`;
       let job = timeSeriesJobs.get(jobKey);
@@ -466,7 +475,7 @@ export async function GET(request: NextRequest) {
           .finally(() => timeSeriesJobs.delete(jobKey));
         timeSeriesJobs.set(jobKey, job);
       }
-      const payload = await job;
+      const payload = limitManifest(await job);
       return NextResponse.json(payload, { status: 200, headers: { "X-IRSA-Cache": "MISS", "Cache-Control": payload.failureSummary.length ? "no-store" : EDGE_CACHE_CONTROL } });
     } catch (error) {
       console.error("[timeseries error]", error);

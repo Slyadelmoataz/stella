@@ -48,7 +48,7 @@ function makeLinks(
   speed: number | null,
 ) {
   const params = new URLSearchParams({ ra: String(ra), dec: String(dec), size: String(size) });
-  const timeSeriesParams = new URLSearchParams({ ra: String(ra), dec: String(dec), size: String(size), mode: "timeseries" });
+  const timeSeriesParams = new URLSearchParams({ ra: String(ra), dec: String(dec), size: String(size), maxrec: "12" });
   const metadataParams = new URLSearchParams({
     ra: String(ra), dec: String(dec), size: String(size), band, target, description, view: mode,
   });
@@ -59,7 +59,7 @@ function makeLinks(
   return {
     webpage: `${requestUrl.origin}/?${metadataParams.toString()}`,
     metadata: `${requestUrl.origin}/api/observations?${metadataParams.toString()}`,
-    frames: `${requestUrl.origin}/api/images?${timeSeriesParams.toString()}`,
+    frames: `${requestUrl.origin}/api/irsa/search?${timeSeriesParams.toString()}`,
     nearbyObjects: `${requestUrl.origin}/api/objects?${params.toString()}`,
   };
 }

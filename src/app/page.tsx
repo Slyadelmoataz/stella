@@ -350,10 +350,10 @@ export default function Home() {
   }, [dataSources, dec, fieldSizeDeg, ra, sourceRegistryReady]);
 
   async function loadTimeSeries(decimalRa: number, decimalDec: number, signal: AbortSignal) {
-    const query = new URLSearchParams({ mode: "timeseries", ra: String(decimalRa), dec: String(decimalDec), size: String(fieldSizeDeg) });
+    const query = new URLSearchParams({ ra: String(decimalRa), dec: String(decimalDec), size: String(fieldSizeDeg), maxrec: "12" });
     try {
       setTimeSeriesStatus("Finding multi-year single-exposure frames…");
-      const response = await fetch(`/api/images?${query}`, { signal });
+      const response = await fetch(`/api/irsa/search?${query}`, { signal });
       const result = await response.json() as {
         frames?: ImageRecord[];
         images?: ImageRecord[];

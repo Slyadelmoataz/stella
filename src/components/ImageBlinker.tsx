@@ -431,14 +431,16 @@ export default function ImageBlinker({
 
     async function downloadFrameWithRetries(url: string): Promise<ArrayBuffer> {
       let lastError = new Error("Could not download this FITS frame.");
-      for (let attempt = 0; attempt < 4; attempt++) {
+      // The frame endpoint already retries its single IRSA packet once.
+      // Keep one browser retry for transient delivery errors without fan-out.
+      for (let attempt = 0; attempt < 2; attempt++) {
         try {
           const response = await fetch(url, { signal: controller.signal });
           if (!response.ok) {
             const retryAfter = Number(response.headers.get("retry-after"));
             const body = await response.json().catch(() => null) as { error?: string } | null;
             lastError = new Error(body?.error || `FITS download failed (${response.status}).`);
-            if (attempt < 3) {
+            if (attempt < 1) {
               const delay = Number.isFinite(retryAfter) && retryAfter > 0
                 ? Math.min(retryAfter * 1000, 10_000)
                 : 800 * (attempt + 1);
@@ -451,7 +453,7 @@ export default function ImageBlinker({
         } catch (error) {
           if (controller.signal.aborted) throw error;
           lastError = error instanceof Error ? error : lastError;
-          if (attempt === 3) throw lastError;
+          if (attempt === 1) throw lastError;
           await new Promise<void>((resolve) => window.setTimeout(resolve, 800 * (attempt + 1)));
         }
       }

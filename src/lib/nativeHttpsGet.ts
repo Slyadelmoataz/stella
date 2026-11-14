@@ -114,7 +114,12 @@ export async function nativeHttpsGetWithRetry(
       });
     } catch (error) {
       lastError = controller.signal.aborted ? timeoutError : error;
-      if (attempt === retries) throw lastError;
+      const retryable = lastError instanceof Error && (
+        lastError.name === "TimeoutError" ||
+        lastError.name === "AbortError" ||
+        /ECONNRESET|EPIPE|EAI_AGAIN|ENOTFOUND|socket hang up|network/i.test(lastError.message)
+      );
+      if (attempt === retries || !retryable) throw lastError;
     } finally {
       clearTimeout(timer);
     }
