@@ -5,6 +5,8 @@ import Image from "next/image";
 import {
   Check,
   Copy,
+  Expand,
+  Minimize2,
   Minus,
   Plus,
   RotateCcw,
@@ -77,6 +79,7 @@ function coordinateToDegrees(value: string, isRa: boolean): number | null {
 }
 
 export default function Home() {
+  const workbenchDisplayRef = useRef<HTMLElement>(null);
   const [ra, setRa] = useState("08h55m10.74s");
   const [dec, setDec] = useState("-7d14m42.5s");
   const [targetName, setTargetName] = useState(TARGET_PRESETS[0].name);
@@ -109,10 +112,36 @@ export default function Home() {
   const [shareCopied, setShareCopied] = useState(false);
   const [viewerMode, setViewerMode] = useState<TimelineLinkState["view"]>("time");
   const [crosshairEnabled, setCrosshairEnabled] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const [cursorReadout, setCursorReadout] = useState<{ ra: number; dec: number; x: number; y: number; flux: number } | null>(null);
   const timeSeriesControllerRef = useRef<AbortController | null>(null);
   const viewerRa = coordinateToDegrees(ra, true) ?? undefined;
   const viewerDec = coordinateToDegrees(dec, false) ?? undefined;
+
+  useEffect(() => {
+    const syncFullscreenState = () => {
+      const active = document.fullscreenElement === workbenchDisplayRef.current;
+      setIsFullscreen(active);
+      if (active) {
+        setZoom(1);
+        setPanOffset({ x: 0, y: 0 });
+      }
+    };
+    document.addEventListener("fullscreenchange", syncFullscreenState);
+    return () => document.removeEventListener("fullscreenchange", syncFullscreenState);
+  }, []);
+
+  async function toggleFullscreen() {
+    const viewer = workbenchDisplayRef.current;
+    if (!viewer) return;
+    if (document.fullscreenElement === viewer) {
+      await document.exitFullscreen();
+      return;
+    }
+    setZoom(1);
+    setPanOffset({ x: 0, y: 0 });
+    await viewer.requestFullscreen();
+  }
   const wiseSourceEnabled = dataSources.find((source) => source.id === "wise-neowise")?.enabled ?? true;
   const spherexSourceEnabled = dataSources.find((source) => source.id === "spherex-archive")?.enabled ?? true;
 
@@ -462,8 +491,8 @@ export default function Home() {
       </header>
 
       <div className="workbench-main">
-        <section className="workbench-display">
-          <div className="viewport-title"><div><strong>{targetName}</strong><span>{targetSubtitle}</span></div><button type="button" className={`reticle-toggle${crosshairEnabled ? " active" : ""}`} aria-pressed={crosshairEnabled} onClick={() => setCrosshairEnabled((enabled) => !enabled)}>＋ Crosshair</button></div>
+        <section className="workbench-display" ref={workbenchDisplayRef}>
+          <div className="viewport-title"><div><strong>{targetName}</strong><span>{targetSubtitle}</span></div><div className="viewport-actions"><button type="button" className={`reticle-toggle${crosshairEnabled ? " active" : ""}`} aria-pressed={crosshairEnabled} onClick={() => setCrosshairEnabled((enabled) => !enabled)}>＋ Crosshair</button><button type="button" className="reticle-toggle fullscreen-toggle" aria-label={isFullscreen ? "Exit full screen" : "Fit image to full screen"} title={isFullscreen ? "Exit full screen" : "Fit image to full screen"} onClick={() => { void toggleFullscreen(); }}>{isFullscreen ? <Minimize2 size={13} aria-hidden="true" /> : <Expand size={13} aria-hidden="true" />}<span>{isFullscreen ? "Exit" : "Full screen"}</span></button></div></div>
           <ImageBlinker
             images={images}
             sourceImages={sourceImages}

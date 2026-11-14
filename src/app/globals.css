@@ -219,8 +219,13 @@ body { background:#000; color:#E2E8F0; font-family:Arial,Helvetica,sans-serif; }
 .viewport-title > div { display:flex; align-items:baseline; gap:9px; min-width:0; }
 .viewport-title strong { overflow:hidden; color:#E2E8F0; font-size:12px; font-weight:500; text-overflow:ellipsis; white-space:nowrap; }
 .viewport-title span { overflow:hidden; color:#82909c; font-size:10px; text-overflow:ellipsis; white-space:nowrap; }
+.viewport-actions { display:flex; flex:0 0 auto; align-items:center; gap:6px; }
 .reticle-toggle { flex:0 0 auto; height:24px; padding:0 8px; border:1px solid #1E242B; border-radius:3px; background:#121721; color:#82909c; font-size:10px; }
 .reticle-toggle.active { border-color:#38BDF8; color:#38BDF8; }
+.fullscreen-toggle { display:flex; align-items:center; justify-content:center; gap:5px; }
+.workbench-display:fullscreen { width:100vw; height:100dvh; max-height:100dvh; flex:none; background:#000; }
+.workbench-display:fullscreen > .image-blinker { flex:1 1 auto; min-height:0; height:auto; }
+.workbench-display:fullscreen .fits-canvas-layer { --zoom:1 !important; --pan-x:0px !important; --pan-y:0px !important; }
 .workbench-display > .image-blinker { flex:1 1 auto; min-height:0; height:auto; border:0; border-radius:0; background:#000; }
 .workbench-display > .request-status { position:absolute; z-index:8; top:46px; left:12px; min-height:0; padding:5px 8px; border:1px solid #1E242B; background:rgba(11,14,20,.9); color:#cbd5e1; font:10px ui-monospace,SFMono-Regular,monospace; }
 .sidebar.inspector-rail { display:block; flex:0 0 320px; width:320px; min-height:0; align-self:stretch; overflow-y:auto; border:0; border-left:1px solid #1E242B; border-radius:0; background:#0B0E14; }
