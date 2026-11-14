@@ -117,7 +117,11 @@ export async function POST(request: NextRequest) {
     const images: SourceImage[] = [];
     const errors: string[] = [];
     const requests = sources.filter((source) => !["wise-neowise", "spherex-archive", "2mass-near-ir"].includes(source.id))
-      .flatMap((source) => source.bands.slice(0, 8).map((band) => ({ source, band: String(band) })));
+      .flatMap((source) => source.bands.slice(0, 8)
+        // The DSS2 color HiPS FITS request is returning 404s here. Use its
+        // separately addressable red and blue photographic plates instead.
+        .filter((band) => !(source.id === "dss2-optical" && String(band).toLowerCase() === "color"))
+        .map((band) => ({ source, band: String(band) })));
     for (let offset = 0; offset < requests.length; offset += 3) {
       const batch = await Promise.all(requests.slice(offset, offset + 3).map(async ({ source, band }) => {
         try {

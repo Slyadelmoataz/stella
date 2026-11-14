@@ -309,6 +309,7 @@ export function precacheFitsFrame(buffer: ArrayBuffer, options: {
   syntheticEpoch?: SyntheticEpochTransform;
   rawPixels?: boolean;
   noiseReduction?: NoiseReductionMode;
+  showCrosshair?: boolean;
 }) {
   const fieldSizeDeg = options.fieldSizeDeg ?? 0.05;
   const key = renderCacheKey({ ...options, fieldSizeDeg });
@@ -772,7 +773,7 @@ function drawSyntheticCube(canvas: HTMLCanvasElement, cube: SpectralCube) {
   context.putImageData(pixels, 0, 0);
 }
 
-export default function FitsCanvasViewer({ url, frameCacheKey, compareFrameCacheKey, buffer, centerRa, centerDec, fieldSizeDeg = 0.05, zoom = 1, panOffset = { x: 0, y: 0 }, onPanChange, onFrameRejected, onCompareFrameRejected, compareBuffer, showOutline = false, differenceMode = "motion", alt = "Astronomical FITS image", spectralCube, syntheticCube, syntheticEpoch, compareSyntheticEpoch, rawPixels = false, noiseReduction = "off", onSpectrumChange, onSpatialImage }: FitsCanvasViewerProps) {
+export default function FitsCanvasViewer({ url, frameCacheKey, compareFrameCacheKey, buffer, centerRa, centerDec, fieldSizeDeg = 0.05, zoom = 1, panOffset = { x: 0, y: 0 }, onPanChange, onFrameRejected, onCompareFrameRejected, compareBuffer, showOutline = false, differenceMode = "motion", alt = "Astronomical FITS image", spectralCube, syntheticCube, syntheticEpoch, compareSyntheticEpoch, rawPixels = false, noiseReduction = "off", showCrosshair = false, onSpectrumChange, onSpatialImage }: FitsCanvasViewerProps) {
   const canvasRefs = [useRef<HTMLCanvasElement>(null), useRef<HTMLCanvasElement>(null)];
   const frontLayerRef = useRef(0);
   const hasRenderedRef = useRef(false);
@@ -933,6 +934,7 @@ export default function FitsCanvasViewer({ url, frameCacheKey, compareFrameCache
     };
   }, [buffer, centerRa, centerDec, compareBuffer, compareFrameCacheKey, compareSyntheticEpoch, differenceMode, fieldSizeDeg, frameCacheKey, noiseReduction, rawPixels, showOutline, syntheticCube, syntheticEpoch, url]);
 
+
   return (
     <div className={`fits-canvas-viewer${zoom > 1 && onPanChange ? " can-pan" : ""}`} onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerCancel={handlePointerUp} onPointerLeave={handlePointerLeave} onClick={(event) => {
       handlePointerLeave();
@@ -949,6 +951,7 @@ export default function FitsCanvasViewer({ url, frameCacheKey, compareFrameCache
           style={{ "--pan-x": `${panOffset.x}px`, "--pan-y": `${panOffset.y}px`, "--zoom": zoom } as React.CSSProperties}
         />
       ))}
+      {showCrosshair && <div className="canvas-crosshair" aria-hidden="true"><i /><i /></div>}
       {status && <div className="fits-canvas-status" role="status">{status}</div>}
     </div>
   );

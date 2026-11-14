@@ -32,7 +32,9 @@ export const BUILT_IN_IMAGE_SOURCES: ImageSource[] = [
     wavelengthRange: "0.4–0.9 µm",
     protocol: "hips2fits",
     endpointUrl: "CDS/P/DSS2",
-    bands: ["color", "red", "blue"],
+    // The color HiPS FITS request returns 404 in this viewer; use its two
+    // FITS-backed photographic plates for the optical composite.
+    bands: ["red", "blue"],
     enabled: true,
     supportsTimeSeries: false,
   },

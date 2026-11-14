@@ -1,13 +1,64 @@
 "use client";
 
 import { useEffect, useRef } from "react";
+import { renderFitsChannel } from "@/components/FitsCanvasViewer";
 import type { NoiseReductionMode, SpectralCube, SpectrumPoint } from "../../utils/spectralCube";
 
 const compositeCache = new WeakMap<SpectralCube, Map<string, HTMLCanvasElement>>();
+const epochPlaneCache = new Map<ArrayBuffer, Map<string, Float32Array>>();
 const MAX_CACHED_GRADES_PER_CUBE = 3;
 
-function getCompositeCanvas(cube: SpectralCube, redArray: number, greenArray: number, blueArray: number, alphaArray?: number, noiseReduction: NoiseReductionMode = "off") {
-  const key = `${redArray}:${greenArray}:${blueArray}:${alphaArray ?? "opaque"}:${noiseReduction}`;
+type EpochFrame = { buffer: ArrayBuffer; key: string };
+
+function projectEpochPlane(frame: EpochFrame, cube: SpectralCube, centerRa: number, centerDec: number, fieldSizeDeg: number) {
+  const projectionKey = `${centerRa}:${centerDec}:${fieldSizeDeg}:${cube.width}:${cube.height}`;
+  let frameCache = epochPlaneCache.get(frame.buffer);
+  if (!frameCache) {
+    frameCache = new Map();
+    epochPlaneCache.set(frame.buffer, frameCache);
+  }
+  const existing = frameCache.get(projectionKey);
+  if (existing) {
+    epochPlaneCache.delete(frame.buffer);
+    epochPlaneCache.set(frame.buffer, frameCache);
+    return existing;
+  }
+  const rendered = renderFitsChannel(frame.buffer, centerRa, centerDec, fieldSizeDeg);
+  const source = document.createElement("canvas");
+  source.width = 512;
+  source.height = 512;
+  const sourceContext = source.getContext("2d");
+  if (!sourceContext) throw new Error("Could not prepare the WISE epoch overlay.");
+  const image = sourceContext.createImageData(512, 512);
+  for (let pixel = 0; pixel < rendered.length; pixel++) {
+    const value = rendered[pixel];
+    const offset = pixel * 4;
+    image.data[offset] = value;
+    image.data[offset + 1] = value;
+    image.data[offset + 2] = value;
+    image.data[offset + 3] = 255;
+  }
+  sourceContext.putImageData(image, 0, 0);
+  const aligned = document.createElement("canvas");
+  aligned.width = cube.width;
+  aligned.height = cube.height;
+  const alignedContext = aligned.getContext("2d");
+  if (!alignedContext) throw new Error("Could not align the WISE epoch overlay.");
+  alignedContext.imageSmoothingEnabled = true;
+  alignedContext.drawImage(source, 0, 0, cube.width, cube.height);
+  const values = new Float32Array(cube.width * cube.height);
+  const pixels = alignedContext.getImageData(0, 0, cube.width, cube.height).data;
+  for (let pixel = 0; pixel < values.length; pixel++) values[pixel] = pixels[pixel * 4] / 255;
+  frameCache.set(projectionKey, values);
+  epochPlaneCache.delete(frame.buffer);
+  epochPlaneCache.set(frame.buffer, frameCache);
+  while (epochPlaneCache.size > 6) epochPlaneCache.delete(epochPlaneCache.keys().next().value!);
+  return values;
+}
+
+function getCompositeCanvas(cube: SpectralCube, redArray: number, greenArray: number, blueArray: number, alphaArray?: number, noiseReduction: NoiseReductionMode = "off", epochFrames?: { w1?: EpochFrame; w2?: EpochFrame }, centerRa?: number, centerDec?: number, fieldSizeDeg = 0.05) {
+  const epochKey = `${epochFrames?.w1?.key ?? ""}:${epochFrames?.w2?.key ?? ""}:${centerRa ?? ""}:${centerDec ?? ""}:${fieldSizeDeg}`;
+  const key = `${redArray}:${greenArray}:${blueArray}:${alphaArray ?? "opaque"}:${noiseReduction}:${epochKey}`;
   let cache = compositeCache.get(cube);
   if (!cache) {
     cache = new Map();
@@ -25,7 +76,16 @@ function getCompositeCanvas(cube: SpectralCube, redArray: number, greenArray: nu
   canvas.height = cube.height * 2;
   const context = canvas.getContext("2d");
   if (!context) return null;
-  const composite = cube.getRGBComposite(redArray, greenArray, blueArray, alphaArray, noiseReduction);
+  const displayOverrides = new Map<number, Float32Array>();
+  if (centerRa !== undefined && centerDec !== undefined && epochFrames?.w1) {
+    const w1 = projectEpochPlane(epochFrames.w1, cube, centerRa, centerDec, fieldSizeDeg);
+    displayOverrides.set(3, w1);
+    displayOverrides.set(4, w1);
+  }
+  if (centerRa !== undefined && centerDec !== undefined && epochFrames?.w2) {
+    displayOverrides.set(5, projectEpochPlane(epochFrames.w2, cube, centerRa, centerDec, fieldSizeDeg));
+  }
+  const composite = cube.getRGBComposite(redArray, greenArray, blueArray, alphaArray, noiseReduction, displayOverrides);
   const pixels = new ImageData(new Uint8ClampedArray(composite), cube.width, cube.height);
   const source = document.createElement("canvas");
   source.width = cube.width;
@@ -62,6 +122,11 @@ export default function SpectralCompositeCanvas({
   onPanChange,
   onSpectrumChange,
   emptyMessage = "SPHEREx cube is being prepared from the selected WISE frame and catalog sources…",
+  showCrosshair = false,
+  epochFrames,
+  centerRa,
+  centerDec,
+  fieldSizeDeg = 0.05,
 }: {
   cube?: SpectralCube;
   redArray: number;
@@ -74,6 +139,11 @@ export default function SpectralCompositeCanvas({
   onPanChange?: (offset: { x: number; y: number }) => void;
   onSpectrumChange?: (spectrum: SpectrumPoint[] | null, pixel?: { x: number; y: number }) => void;
   emptyMessage?: string;
+  showCrosshair?: boolean;
+  epochFrames?: { w1?: EpochFrame; w2?: EpochFrame };
+  centerRa?: number;
+  centerDec?: number;
+  fieldSizeDeg?: number;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const panStartRef = useRef<{ x: number; y: number; offsetX: number; offsetY: number } | null>(null);
@@ -85,7 +155,7 @@ export default function SpectralCompositeCanvas({
     const canvas = canvasRef.current;
     const context = canvas?.getContext("2d");
     if (!canvas || !context || !cube) return;
-    const cachedComposite = getCompositeCanvas(cube, redArray, greenArray, blueArray, alphaArray, noiseReduction);
+    const cachedComposite = getCompositeCanvas(cube, redArray, greenArray, blueArray, alphaArray, noiseReduction, epochFrames, centerRa, centerDec, fieldSizeDeg);
     if (!cachedComposite) return;
     canvas.width = cachedComposite.width;
     canvas.height = cachedComposite.height;
@@ -93,7 +163,7 @@ export default function SpectralCompositeCanvas({
     context.imageSmoothingQuality = "high";
     context.clearRect(0, 0, canvas.width, canvas.height);
     context.drawImage(cachedComposite, 0, 0);
-  }, [alphaArray, blueArray, cube, greenArray, noiseReduction, redArray]);
+  }, [alphaArray, blueArray, centerDec, centerRa, cube, epochFrames, fieldSizeDeg, greenArray, noiseReduction, redArray]);
 
   useEffect(() => () => {
     if (hoverTimerRef.current !== null) window.clearTimeout(hoverTimerRef.current);
@@ -159,6 +229,7 @@ export default function SpectralCompositeCanvas({
       flushSpectrumInspection(event.clientX, event.clientY);
     }}>
       <canvas ref={canvasRef} className="spectral-composite-canvas" style={{ transform: `translate(${panOffset.x}px, ${panOffset.y}px) scale(${zoom})`, transformOrigin: "center" }} role="img" aria-label="SPHEREx six-array false-color RGB composite" />
+      {showCrosshair && <div className="canvas-crosshair" aria-hidden="true"><i /><i /></div>}
     </div>
   ) : (
     <div className="spectral-composite-empty" role="status">

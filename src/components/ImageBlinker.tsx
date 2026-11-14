@@ -49,6 +49,10 @@ export type ImageBlinkerProps = {
   timeSeriesStatus?: string;
   initialTimeline?: TimelineLinkState | null;
   onTimelineStateChange?: (state: TimelineLinkState) => void;
+  viewMode?: "time" | "spherex" | "multimission";
+  onViewModeChange?: (mode: "time" | "spherex" | "multimission") => void;
+  showCrosshair?: boolean;
+  onCursorReadout?: (value: { ra: number; dec: number; x: number; y: number; flux: number } | null) => void;
 };
 
 export type TimelineLinkState = {
@@ -101,6 +105,10 @@ export default function ImageBlinker({
   timeSeriesStatus = "",
   initialTimeline = null,
   onTimelineStateChange,
+  viewMode: controlledViewMode,
+  onViewModeChange,
+  showCrosshair = false,
+  onCursorReadout,
 }: ImageBlinkerProps) {
   const [selectedBand, setSelectedBand] = useState("wise-w1");
   const [isPlaying, setIsPlaying] = useState(false);
@@ -116,7 +124,9 @@ export default function ImageBlinker({
   const [isDownloading, setIsDownloading] = useState(false);
   const [spectrum, setSpectrum] = useState<SpectrumPoint[] | null>(null);
   const [spectrumTarget, setSpectrumTarget] = useState("");
-  const [viewMode, setViewMode] = useState<"time" | "spherex" | "multimission">("time");
+  const [localViewMode, setLocalViewMode] = useState<"time" | "spherex" | "multimission">("time");
+  const viewMode = controlledViewMode ?? localViewMode;
+  const setViewMode = onViewModeChange ?? setLocalViewMode;
   const [redArray, setRedArray] = useState(5);
   const [greenArray, setGreenArray] = useState(3);
   const [blueArray, setBlueArray] = useState(1);
@@ -140,6 +150,10 @@ export default function ImageBlinker({
     setSelectedBand(initialTimeline.band);
     setViewMode(initialTimeline.view);
   }, [initialTimeline]);
+
+  useEffect(() => {
+    if (viewMode !== "time" && selectedBand !== "wise-w1" && selectedBand !== "wise-w2") setSelectedBand("wise-w1");
+  }, [selectedBand, viewMode]);
 
   const playbackRecords = useMemo<BandFrame[]>(() => images
     .map((image, sourceIndex) => ({ ...image, sourceIndex }))
@@ -198,6 +212,31 @@ export default function ImageBlinker({
     }
     return result;
   }, [frameBuffers, images]);
+  const wiseEpochPair = useMemo(() => {
+    const targetMjd = frameA?.mjd;
+    const nearest = (band: "wise-w1" | "wise-w2") => {
+      const candidates = playbackRecords.filter((frame) => frame.band.toLowerCase() === band && frameBuffers?.[frame.sourceIndex]);
+      if (!candidates.length) return undefined;
+      return candidates.reduce((best, candidate) => {
+        if (targetMjd === null || targetMjd === undefined) return candidate;
+        const bestDistance = Math.abs((best.mjd ?? Infinity) - targetMjd);
+        const candidateDistance = Math.abs((candidate.mjd ?? Infinity) - targetMjd);
+        return candidateDistance < bestDistance ? candidate : best;
+      });
+    };
+    const w1 = nearest("wise-w1");
+    const w2 = nearest("wise-w2");
+    const build = (frame: BandFrame | undefined) => frame && frameBuffers?.[frame.sourceIndex]
+      ? { buffer: frameBuffers[frame.sourceIndex]!, key: `${frame.id ?? frame.frameId ?? frame.url}:${frame.mjd ?? ""}` }
+      : undefined;
+    return { w1: build(w1), w2: build(w2), targetMjd };
+  }, [frameA?.mjd, frameBuffers, playbackRecords]);
+  const timedWiseCompositeFrames = useMemo<WiseFrame[]>(() => {
+    const frames: WiseFrame[] = [];
+    if (wiseEpochPair.w1) frames.push({ url: wiseEpochPair.w1.key, band: "wise-w1", buffer: wiseEpochPair.w1.buffer });
+    if (wiseEpochPair.w2) frames.push({ url: wiseEpochPair.w2.key, band: "wise-w2", buffer: wiseEpochPair.w2.buffer });
+    return frames.length ? frames : wiseCompositeFrames;
+  }, [wiseCompositeFrames, wiseEpochPair]);
   const wavelengthLabel = wavelengthOptions.find(({ id }) => id === selectedBand)?.label ?? selectedBand;
   const totalAvailable = playbackRecords.filter(({ sourceIndex }) => Boolean(frameBuffers?.[sourceIndex])).length;
 
@@ -332,12 +371,6 @@ export default function ImageBlinker({
   const activeCube = irsaCube ?? spectralCube ?? generatedCube;
   const hasLiveCube = Boolean(irsaCube ?? spectralCube);
   const cubeLabel = hasLiveCube ? "Live IRSA SPHEREx Cube" : wiseSpatial ? "Synthesized from WISE + SIMBAD SED" : "Offline Gaussian Starfield · Model Only";
-  useEffect(() => {
-    if (viewMode === "spherex" && cubeLoadError && (surveyCompositeFrames.length || wiseCompositeFrames.length)) {
-      setViewMode("multimission");
-    }
-  }, [cubeLoadError, surveyCompositeFrames.length, viewMode, wiseCompositeFrames.length]);
-
   useEffect(() => {
     if (availableFrames.length < 2) {
       setIsPlaying(false);
@@ -542,7 +575,16 @@ export default function ImageBlinker({
 
   const handleCanvasSpectrum = (nextSpectrum: SpectrumPoint[] | null, pixel?: { x: number; y: number }) => {
     setSpectrum(nextSpectrum);
-    if (pixel) setSpectrumTarget(`Pixel ${Math.round(pixel.x)}, ${Math.round(pixel.y)}`);
+    if (pixel) {
+      setSpectrumTarget(`Pixel ${Math.round(pixel.x)}, ${Math.round(pixel.y)}`);
+      if (centerRa !== undefined && centerDec !== undefined) {
+        const width = viewMode === "multimission" ? 512 : activeCube?.width ?? 128;
+        const height = viewMode === "multimission" ? 512 : activeCube?.height ?? 128;
+        const ra = (centerRa + (width / 2 - pixel.x) * fieldSizeDeg / width / Math.max(Math.cos(centerDec * Math.PI / 180), 0.01) + 360) % 360;
+        const dec = centerDec + (height / 2 - pixel.y) * fieldSizeDeg / height;
+        onCursorReadout?.({ ra, dec, x: Math.round(pixel.x), y: Math.round(pixel.y), flux: nextSpectrum?.[Math.max(0, nextSpectrum.length - 1)]?.flux ?? 0 });
+      }
+    } else onCursorReadout?.(null);
   };
 
   const rejectFrame = (sourceIndex: number) => {
@@ -561,7 +603,7 @@ export default function ImageBlinker({
 
   return (
     <section className="image-blinker" aria-label="Infrared image comparison">
-      <div className="band-window-selector">
+      <div className={`band-window-selector${viewMode === "multimission" ? " is-minimal" : ""}`}>
         <div className="viewer-mode-toggle" role="group" aria-label="Image viewer mode">
           <button type="button" className={viewMode === "time" ? "active" : ""} aria-pressed={viewMode === "time"} onClick={() => setViewMode("time")}>Time Motion (WiseView)</button>
           <button type="button" className={viewMode === "spherex" ? "active" : ""} aria-pressed={viewMode === "spherex"} disabled={!spherexEnabled} onClick={() => { setCubeLoadError(""); setViewMode("spherex"); }}>SPHEREx 6-Array RGB</button>
@@ -579,7 +621,7 @@ export default function ImageBlinker({
           <label className="rgba-toggle"><input type="checkbox" checked={rgbaEnabled} onChange={(event) => setRgbaEnabled(event.target.checked)} /> RGBA</label>
           {rgbaEnabled && <label className="rgb-mapping rgb-a"><span>A</span><select aria-label="Alpha array" value={alphaArray} onChange={(event) => setAlphaArray(Number(event.target.value))}>{SPHEREX_ARRAYS.map((array) => <option key={array.index} value={array.index}>{array.label}</option>)}</select></label>}
           <span className="rgb-grade-label">JWST-inspired · Rust / Gold / Sapphire</span>
-        </div> : <div className="rgb-grade-label">DSS2 optical + WISE infrared</div>}
+        </div> : null}
       </div>
 
       {viewMode === "spherex" ? <>
@@ -587,7 +629,15 @@ export default function ImageBlinker({
           <span className={`spectral-source-badge${hasLiveCube ? " is-live" : " is-synthetic"}`}>{activeCube ? cubeLabel : "Waiting for WISE image data"}</span>
           <span>{hasLiveCube ? "Observed data" : isLoadingIrsaCube ? "Searching archive · model fallback is visualization only" : cubeLoadError ? `Archive unavailable · model fallback is visualization only` : spherexImageCount ? "Spectral cutouts found · model fallback is visualization only" : "Model · not calibrated for science"}</span>
         </div>
-        <SpectralCompositeCanvas cube={activeCube} redArray={redArray} greenArray={greenArray} blueArray={blueArray} alphaArray={rgbaEnabled ? alphaArray : undefined} noiseReduction={noiseReduction} zoom={zoom} panOffset={panOffset} onPanChange={onPanChange} onSpectrumChange={handleCanvasSpectrum} />
+        <div className="spectral-source-strip epoch-source-strip"><span>WISE W1/W2 epoch in Arrays 4–6 · short arrays held</span><span>Display-only overlay; SPHEREx spectra remain unchanged</span></div>
+        <div className="shared-epoch-controls">
+          <span>{frameA ? `WISE epoch · ${mjdLabel(frameA.mjd)}` : "WISE epoch unavailable"}</span>
+          <select aria-label="Timeline WISE band" value={selectedBand} onChange={(event) => setSelectedBand(event.target.value)}><option value="wise-w1">W1 · 3.4 μm</option><option value="wise-w2">W2 · 4.6 μm</option></select>
+          <input aria-label="SPHEREx display epoch" className="range-input playback-timeline" type="range" min="0" max={maxRangeIndex} step="1" value={safeStart} disabled={availableFrames.length < 2} onChange={(event) => { followLatestRef.current = false; setRangeStart(Number(event.target.value)); }} />
+          <button className="image-blinker-toggle" type="button" onClick={() => setIsPlaying((playing) => !playing)} disabled={availableFrames.length < 2} aria-pressed={isPlaying}>{isPlaying ? "Pause" : "Play"}</button>
+          <small>{availableFrames.length} epochs · {mjdLabel(availableFrames[0]?.mjd)} – {mjdLabel(availableFrames[availableFrames.length - 1]?.mjd)}</small>
+        </div>
+        <SpectralCompositeCanvas cube={activeCube} redArray={redArray} greenArray={greenArray} blueArray={blueArray} alphaArray={rgbaEnabled ? alphaArray : undefined} noiseReduction={noiseReduction} zoom={zoom} panOffset={panOffset} onPanChange={onPanChange} onSpectrumChange={handleCanvasSpectrum} showCrosshair={showCrosshair} epochFrames={wiseEpochPair} centerRa={centerRa} centerDec={centerDec} fieldSizeDeg={fieldSizeDeg} />
         {!wiseSpatial && frameA && frameBuffers?.[frameA.sourceIndex] && (
           <div className="cube-spatial-source" aria-hidden="true">
             <FitsCanvasViewer frameCacheKey={frameAKey} buffer={frameBuffers[frameA.sourceIndex]!} url={frameA.url} centerRa={centerRa} centerDec={centerDec} fieldSizeDeg={fieldSizeDeg} noiseReduction={noiseReduction} alt="WISE spatial source for model cube" onSpatialImage={(width, height, values) => setWiseSpatial((current) => current?.values === values ? current : { width, height, values })} />
@@ -595,13 +645,21 @@ export default function ImageBlinker({
         )}
       </> : viewMode === "multimission" ? <>
       <div className="spectral-source-strip"><span className="spectral-source-badge is-live">DSS2 + WISE survey composite</span><span>Independent survey images · not calibrated SPHEREx data</span></div>
-        <MultiMissionCompositeCanvas surveyFrames={surveyCompositeFrames} wiseFrames={wiseCompositeFrames} centerRa={centerRa} centerDec={centerDec} fieldSizeDeg={fieldSizeDeg} onSpectrumChange={handleCanvasSpectrum} />
+        <div className="shared-epoch-controls">
+          <span>{frameA ? `WISE epoch · ${mjdLabel(frameA.mjd)}` : "WISE epoch unavailable"}</span>
+          <select aria-label="Timeline WISE band" value={selectedBand} onChange={(event) => setSelectedBand(event.target.value)}><option value="wise-w1">W1 · 3.4 μm</option><option value="wise-w2">W2 · 4.6 μm</option></select>
+          <input aria-label="Multi-mission WISE epoch" className="range-input playback-timeline" type="range" min="0" max={maxRangeIndex} step="1" value={safeStart} disabled={availableFrames.length < 2} onChange={(event) => { followLatestRef.current = false; setRangeStart(Number(event.target.value)); }} />
+          <button className="image-blinker-toggle" type="button" onClick={() => setIsPlaying((playing) => !playing)} disabled={availableFrames.length < 2} aria-pressed={isPlaying}>{isPlaying ? "Pause" : "Play"}</button>
+          <span className="subtraction-tooltip" title="Pixel subtraction requires same-instrument epochs"><button className="image-blinker-toggle subtraction-unavailable" type="button" disabled>Subtract</button></span>
+          <small>{availableFrames.length} WISE epochs · DSS2 optical reference stays fixed</small>
+        </div>
+        <MultiMissionCompositeCanvas surveyFrames={surveyCompositeFrames} wiseFrames={timedWiseCompositeFrames} centerRa={centerRa} centerDec={centerDec} fieldSizeDeg={fieldSizeDeg} onSpectrumChange={handleCanvasSpectrum} showCrosshair={showCrosshair} />
       </> : <>
       <div className="spectral-source-strip"><span className="spectral-source-badge is-live">WISE / NEOWISE single exposures</span></div>
       <div className="single-playback-view">
         <header className="compare-pane-header"><h3>{frameA ? `Frame ${startIdx + 1} / ${availableFrames.length}` : "Time-series playback"}</h3><time>{mjdLabel(frameA?.mjd)}</time></header>
         <div className="image-blinker-frame">
-          {frameA && frameBuffers?.[frameA.sourceIndex] ? <FitsCanvasViewer key={`playback:${frameAKey}`} frameCacheKey={frameAKey} buffer={frameBuffers[frameA.sourceIndex]!} url={frameA.url} centerRa={centerRa} centerDec={centerDec} fieldSizeDeg={fieldSizeDeg} zoom={zoom} panOffset={panOffset} onPanChange={onPanChange} rawPixels noiseReduction={noiseReduction} onFrameRejected={() => rejectFrame(frameA.sourceIndex)} spectralCube={activeCube} onSpectrumChange={handleCanvasSpectrum} onSpatialImage={(width, height, values) => setWiseSpatial((current) => current?.values === values ? current : { width, height, values })} alt={`${alt}, ${wavelengthLabel}, ${mjdLabel(frameA.mjd)}`} /> : <div className="image-blinker-empty">{isDownloading ? "Receiving NASA frames…" : timeSeriesStatus || "No NASA single-exposure frames available for this position."}</div>}
+          {frameA && frameBuffers?.[frameA.sourceIndex] ? <FitsCanvasViewer key={`playback:${frameAKey}`} frameCacheKey={frameAKey} buffer={frameBuffers[frameA.sourceIndex]!} url={frameA.url} centerRa={centerRa} centerDec={centerDec} fieldSizeDeg={fieldSizeDeg} zoom={zoom} panOffset={panOffset} onPanChange={onPanChange} rawPixels noiseReduction={noiseReduction} showCrosshair={showCrosshair} onFrameRejected={() => rejectFrame(frameA.sourceIndex)} spectralCube={activeCube} onSpectrumChange={handleCanvasSpectrum} onSpatialImage={(width, height, values) => setWiseSpatial((current) => current?.values === values ? current : { width, height, values })} alt={`${alt}, ${wavelengthLabel}, ${mjdLabel(frameA.mjd)}`} /> : <div className="image-blinker-empty">{isDownloading ? "Receiving NASA frames…" : timeSeriesStatus || "No NASA single-exposure frames available for this position."}</div>}
         </div>
       </div>
 

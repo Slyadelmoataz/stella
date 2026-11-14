@@ -107,6 +107,9 @@ export default function Home() {
   const [timelineShare, setTimelineShare] = useState<TimelineLinkState>({ band: "wise-w1", view: "time" });
   const [urlInitialized, setUrlInitialized] = useState(false);
   const [shareCopied, setShareCopied] = useState(false);
+  const [viewerMode, setViewerMode] = useState<TimelineLinkState["view"]>("time");
+  const [crosshairEnabled, setCrosshairEnabled] = useState(false);
+  const [cursorReadout, setCursorReadout] = useState<{ ra: number; dec: number; x: number; y: number; flux: number } | null>(null);
   const timeSeriesControllerRef = useRef<AbortController | null>(null);
   const viewerRa = coordinateToDegrees(ra, true) ?? undefined;
   const viewerDec = coordinateToDegrees(dec, false) ?? undefined;
@@ -145,6 +148,7 @@ export default function Home() {
     };
     setInitialTimeline(timeline);
     setTimelineShare(timeline);
+    setViewerMode(timeline.view);
     setUrlInitialized(true);
   }, []);
 
@@ -265,10 +269,7 @@ export default function Home() {
           const objects = await response.json() as SimbadObject[];
           if (!controller.signal.aborted) setSimbadObjects(Array.isArray(objects) ? objects.slice(0, MAX_NEARBY_OBJECTS) : []);
         } catch {
-          if (!controller.signal.aborted) {
-            setSimbadObjects([]);
-            setRequestError((current) => current ? `${current} · Object search unavailable` : "Object search unavailable");
-          }
+          if (!controller.signal.aborted) setSimbadObjects([]);
         }
       })();
 
@@ -441,21 +442,28 @@ export default function Home() {
     }
   }
 
+  // Keep upstream HTML/error payloads out of the workbench. DSS2's legacy
+  // color endpoint can return a branded 404 page; it is not actionable UI.
+  const visibleSourceError = sourceErrors
+    .filter((error) => !/DSS2 Optical Survey/i.test(error))
+    .map((error) => error.split(/\s*:root\b/i)[0].replace(/<[^>]*>/g, "").trim().slice(0, 160))
+    .find(Boolean);
+
   return (
     <main className="app-shell">
-      <header className="topbar">
-        <a className="brand" href="#" aria-label="Stella home"><Image src="/stella-logo.png" alt="" width={215} height={148} priority /><span>STELLA</span></a>
+      <header className="workbench-topbar">
+        <a className="brand" href="#" aria-label="Stella home"><Image src="/stella-logo.png" alt="" width={215} height={148} priority /><span>STELLA</span><small>ASTRONOMICAL WORKBENCH</small></a>
+        <div className="telemetry-readout" aria-live="polite">
+          {cursorReadout ? <><span>RA <b>{cursorReadout.ra.toFixed(6)}°</b></span><span>Dec <b>{cursorReadout.dec.toFixed(6)}°</b></span><span>Pix <b>{cursorReadout.x},{cursorReadout.y}</b></span><span>Flux <b>{cursorReadout.flux.toExponential(3)}</b></span></> : <span className="telemetry-idle">MOVE CURSOR OVER IMAGE FOR WCS / FLUX</span>}
+        </div>
+        <nav className="topbar-mode-tabs" aria-label="Viewer mode">
+          {[{ id: "spherex", title: "SPHEREx 6-Array RGB" }, { id: "time", title: "Time Motion Blinker" }, { id: "multimission", title: "Multi-mission" }].map(({ id, title }) => <button key={id} type="button" className={viewerMode === id ? "active" : ""} aria-pressed={viewerMode === id} disabled={id === "spherex" && !spherexSourceEnabled} onClick={() => setViewerMode(id as TimelineLinkState["view"])}>{title}</button>)}
+        </nav>
       </header>
 
-      <div className="layout">
-        <section className="viewer">
-          <div className="object-heading">
-            <div>
-              <h1>{targetName}</h1>
-              <p className="subheading">{targetSubtitle}</p>
-            </div>
-          </div>
-
+      <div className="workbench-main">
+        <section className="workbench-display">
+          <div className="viewport-title"><div><strong>{targetName}</strong><span>{targetSubtitle}</span></div><button type="button" className={`reticle-toggle${crosshairEnabled ? " active" : ""}`} aria-pressed={crosshairEnabled} onClick={() => setCrosshairEnabled((enabled) => !enabled)}>＋ Crosshair</button></div>
           <ImageBlinker
             images={images}
             sourceImages={sourceImages}
@@ -474,27 +482,44 @@ export default function Home() {
             timeSeriesStatus={timeSeriesStatus}
             initialTimeline={initialTimeline}
             onTimelineStateChange={setTimelineShare}
+            viewMode={viewerMode}
+            onViewModeChange={setViewerMode}
+            showCrosshair={crosshairEnabled}
+            onCursorReadout={setCursorReadout}
             onIrsaFailure={() => setIrsaFailed(true)}
             alt="Astronomical image time-lapse"
           />
           {(loading || requestError) && <div className="request-status" aria-live="polite">{loading ? "Loading observation…" : requestError}</div>}
 
-          <div className="viewer-footer">
-            <div className="zoom-controls">
-              <button aria-label="Reset zoom" onClick={() => { setZoom(1); setPanOffset({ x: 0, y: 0 }); }}><RotateCcw size={14} /></button>
-              <span className="controls-divider" />
-              <button aria-label="Zoom out" onClick={() => setZoom((value) => Math.max(1, +(value - 0.5).toFixed(1)))}><Minus size={14} /></button>
-              <span className="zoom-value">{zoom.toFixed(1)}×</span>
-              <button aria-label="Zoom in" onClick={() => setZoom((value) => Math.min(10, +(value + 0.5).toFixed(1)))}><Plus size={14} /></button>
-            </div>
-          </div>
         </section>
 
-        <aside className="sidebar">
-          <div className="sidebar-heading"><h2>Observation</h2></div>
+        <aside className="sidebar inspector-rail">
+          <details className="inspector-section" open>
+            <summary>TARGET &amp; COORDINATES</summary>
+            <div className="inspector-content">
+              <div className="target-preset-list">
+                {TARGET_PRESETS.map((target) => <button key={target.name} type="button" className={target.name === targetName ? "active" : ""} aria-pressed={target.name === targetName} onClick={() => {
+                  setRa(target.ra); setDec(target.dec); const isBrownDwarf = target.name === "WISE 0855 Brown Dwarf";
+                  setFieldSizeDeg(isBrownDwarf ? 0.05 : 0.25); setZoom(isBrownDwarf ? 1.5 : 1); setPanOffset({ x: 0, y: 0 });
+                  setTargetName(target.name); setTargetSubtitle(target.subtitle);
+                }}>{target.name}</button>)}
+              </div>
+              <label htmlFor="right-ascension">Right ascension <span>RA</span></label>
+              <input id="right-ascension" className="text-input" value={ra} onChange={(event) => { setRa(event.target.value); setTargetName("Custom target"); setTargetSubtitle("User-entered J2000 coordinates"); }} />
+              <label htmlFor="declination">Declination <span>DEC</span></label>
+              <input id="declination" className="text-input" value={dec} onChange={(event) => { setDec(event.target.value); setTargetName("Custom target"); setTargetSubtitle("User-entered J2000 coordinates"); }} />
+              <label htmlFor="field-of-view">Field of view</label>
+              <select id="field-of-view" className="text-input field-of-view-select" value={fieldSizeDeg} onChange={(event) => { setFieldSizeDeg(Number(event.target.value)); setPanOffset({ x: 0, y: 0 }); }}>
+                {FIELD_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+              </select>
+              <button className="locate-button" type="button" onClick={() => setRefreshKey((key) => key + 1)}><Search size={14} /> Refresh results</button>
+              <div className="observation-link-tools"><button type="button" className="share-link-button" onClick={() => void copyObservationLink()}>{shareCopied ? <Check size={13} /> : <Copy size={13} />}{shareCopied ? "Copied link" : "Copy observation link"}</button><a className="metadata-api-link" href={observationMetadataHref()} target="_blank" rel="noreferrer">Open JSON metadata / webhook API</a></div>
+            </div>
+          </details>
 
-          <section className="control-group data-source-group">
-            <div className="group-heading"><h3>Data Sources</h3><output>{dataSources.filter((source) => source.enabled).length} active</output></div>
+          <details className="inspector-section" open>
+            <summary>DATA SOURCES <span>{dataSources.filter((source) => source.enabled).length} ACTIVE</span></summary>
+            <div className="inspector-content">
             <div className="data-source-list">
               {dataSources.map((source) => <label className="data-source-row" key={source.id}>
                 <input type="checkbox" checked={source.enabled} onChange={(event) => toggleSource(source.id, event.target.checked)} />
@@ -502,66 +527,32 @@ export default function Home() {
               </label>)}
             </div>
             <button type="button" className="add-source-button" onClick={() => setShowAddSource(true)}>＋ Add Source</button>
-            {sourceErrors[0] && <p className="source-fetch-error">{sourceErrors[0]}</p>}
-          </section>
-
-          <section className="control-group quick-target-group">
-            <div className="group-heading"><h3>Quick targets</h3></div>
-            <div className="target-preset-list">
-              {TARGET_PRESETS.map((target) => (
-                <button key={target.name} type="button" className={target.name === targetName ? "active" : ""} aria-pressed={target.name === targetName} onClick={() => {
-                  setRa(target.ra);
-                  setDec(target.dec);
-                  const isBrownDwarf = target.name === "WISE 0855 Brown Dwarf";
-                  setFieldSizeDeg(isBrownDwarf ? 0.05 : 0.25);
-                  setZoom(isBrownDwarf ? 1.5 : 1.0);
-                  setPanOffset({ x: 0, y: 0 });
-                  setTargetName(target.name);
-                  setTargetSubtitle(target.subtitle);
-                }}>{target.name}</button>
-              ))}
+            {visibleSourceError && <p className="source-fetch-error">{visibleSourceError}</p>}
             </div>
-            <label htmlFor="field-of-view">Field of View</label>
-            <select id="field-of-view" className="text-input field-of-view-select" value={fieldSizeDeg} onChange={(event) => { setFieldSizeDeg(Number(event.target.value)); setPanOffset({ x: 0, y: 0 }); }}>
-              {FIELD_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-            </select>
-          </section>
+          </details>
 
-          <section className="control-group coordinates-group">
-            <div className="group-heading"><h3>Coordinates</h3></div>
-            <label htmlFor="right-ascension">Right ascension <span>RA</span></label>
-            <input id="right-ascension" className="text-input" value={ra} onChange={(event) => { setRa(event.target.value); setTargetName("Custom target"); setTargetSubtitle("User-entered J2000 coordinates"); }} />
-            <label htmlFor="declination">Declination <span>DEC</span></label>
-            <input id="declination" className="text-input" value={dec} onChange={(event) => { setDec(event.target.value); setTargetName("Custom target"); setTargetSubtitle("User-entered J2000 coordinates"); }} />
-            <button className="locate-button" type="button" onClick={() => setRefreshKey((key) => key + 1)}><Search size={14} /> Refresh results</button>
-            <div className="observation-link-tools">
-              <button type="button" className="share-link-button" onClick={() => void copyObservationLink()}>{shareCopied ? <Check size={13} /> : <Copy size={13} />}{shareCopied ? "Copied link" : "Copy observation link"}</button>
-              <a className="metadata-api-link" href={observationMetadataHref()} target="_blank" rel="noreferrer">Open JSON metadata / webhook API</a>
-            </div>
-          </section>
-
-          <section className="control-group range-group">
+          <details className="inspector-section" open>
+            <summary>DISPLAY &amp; NOISE</summary>
+            <div className="inspector-content">
             <div className="group-heading"><h3>Zoom</h3><output>{zoom.toFixed(1)}×</output></div>
+            <div className="zoom-controls"><button aria-label="Reset zoom" onClick={() => { setZoom(1); setPanOffset({ x: 0, y: 0 }); }}><RotateCcw size={14} /></button><button aria-label="Zoom out" onClick={() => setZoom((value) => Math.max(1, +(value - 0.5).toFixed(1)))}><Minus size={14} /></button><span className="zoom-value">{zoom.toFixed(1)}×</span><button aria-label="Zoom in" onClick={() => setZoom((value) => Math.min(10, +(value + 0.5).toFixed(1)))}><Plus size={14} /></button></div>
             <input className="range-input" aria-label="Zoom" type="range" min="1" max="10" step="0.1" value={zoom} style={{ "--progress": `${((zoom - 1) / 9) * 100}%` } as React.CSSProperties} onChange={(event) => setZoom(Number(event.target.value))} />
             <div className="range-ends"><span>1×</span><span>10×</span></div>
-          </section>
-
-          <section className="control-group range-group playback-group">
             <div className="group-heading"><h3>Playback speed</h3><output>{playbackSpeed} ms</output></div>
             <input className="range-input" aria-label="Playback Speed" type="range" min="100" max="1000" step="50" value={playbackSpeed} style={{ "--progress": `${((playbackSpeed - 100) / 900) * 100}%` } as React.CSSProperties} onChange={(event) => setPlaybackSpeed(Number(event.target.value))} />
             <div className="range-ends"><span>100 ms</span><span>1000 ms</span></div>
-          </section>
-
-          <section className="control-group noise-reduction-group">
             <div className="group-heading"><h3>Noise reduction</h3></div>
             <select className="noise-reduction-select" aria-label="Noise reduction" value={noiseReduction} onChange={(event) => setNoiseReduction(event.target.value as NoiseReductionMode)}>
               <option value="off">Off</option>
               <option value="standard">Standard</option>
               <option value="aggressive">Aggressive</option>
             </select>
-          </section>
+            </div>
+          </details>
 
-          <section className="control-group nearby-group">
+          <details className="inspector-section" open>
+            <summary>CATALOG CROSS-MATCH <span>{simbadObjects.length}</span></summary>
+            <div className="inspector-content">
             <div className="group-heading"><h3>Nearby objects</h3><output>{simbadObjects.length}</output></div>
             {simbadObjects.length === 0 ? (
               <p className="nearby-empty">{loading ? "Searching…" : "No catalog objects found in this radius."}</p>
@@ -575,7 +566,8 @@ export default function Home() {
                 ))}
               </ul>
             )}
-          </section>
+            </div>
+          </details>
 
         </aside>
       </div>

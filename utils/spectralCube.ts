@@ -117,8 +117,13 @@ export class SpectralCube {
   }
 
   /** Create a sky-subtracted, JWST-inspired false-color composite. */
-  getRGBComposite(rArray: number, gArray: number, bArray: number, alphaArray?: number, noiseReduction: NoiseReductionMode = "off"): Uint8ClampedArray {
-    const channels = [rArray, gArray, bArray, ...(alphaArray === undefined ? [] : [alphaArray])].map((index) => this.getCoaddedArrayImage(index));
+  getRGBComposite(rArray: number, gArray: number, bArray: number, alphaArray?: number, noiseReduction: NoiseReductionMode = "off", displayOverrides?: ReadonlyMap<number, Float32Array>): Uint8ClampedArray {
+    const channels = [rArray, gArray, bArray, ...(alphaArray === undefined ? [] : [alphaArray])].map((index) => {
+      // Display-only epoch overlays let WISE morphology animate long-wave
+      // false-color channels without altering this cube's measured spectra.
+      const override = displayOverrides?.get(index);
+      return override?.length === this.width * this.height ? override : this.getCoaddedArrayImage(index);
+    });
     const median = (sorted: number[]) => {
       const middle = Math.floor(sorted.length / 2);
       return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;

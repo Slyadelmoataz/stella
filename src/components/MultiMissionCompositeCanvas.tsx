@@ -7,6 +7,7 @@ import type { SpectrumPoint } from "../../utils/spectralCube";
 export type SurveyFrame = { url: string; band: string; sourceId: string; sourceName: string };
 export type WiseFrame = { url: string; band: string; buffer: ArrayBuffer };
 const responseCache = new Map<string, Promise<ArrayBuffer>>();
+const renderedLayerCache = new Map<ArrayBuffer, Map<string, Uint8Array>>();
 
 async function fetchFits(url: string) {
   let cached = responseCache.get(url);
@@ -21,6 +22,27 @@ async function fetchFits(url: string) {
   return cached;
 }
 
+function renderLayerCached(buffer: ArrayBuffer, centerRa: number, centerDec: number, fieldSizeDeg: number) {
+  const key = `${centerRa}:${centerDec}:${fieldSizeDeg}`;
+  let cache = renderedLayerCache.get(buffer);
+  if (!cache) {
+    cache = new Map();
+    renderedLayerCache.set(buffer, cache);
+  }
+  const existing = cache.get(key);
+  if (existing) {
+    renderedLayerCache.delete(buffer);
+    renderedLayerCache.set(buffer, cache);
+    return existing;
+  }
+  const rendered = renderFitsChannel(buffer, centerRa, centerDec, fieldSizeDeg);
+  cache.set(key, rendered);
+  renderedLayerCache.delete(buffer);
+  renderedLayerCache.set(buffer, cache);
+  while (renderedLayerCache.size > 8) renderedLayerCache.delete(renderedLayerCache.keys().next().value!);
+  return rendered;
+}
+
 export default function MultiMissionCompositeCanvas({
   surveyFrames,
   wiseFrames,
@@ -28,6 +50,7 @@ export default function MultiMissionCompositeCanvas({
   centerDec,
   fieldSizeDeg,
   onSpectrumChange,
+  showCrosshair = false,
 }: {
   surveyFrames: SurveyFrame[];
   wiseFrames: WiseFrame[];
@@ -35,6 +58,7 @@ export default function MultiMissionCompositeCanvas({
   centerDec?: number;
   fieldSizeDeg: number;
   onSpectrumChange?: (spectrum: SpectrumPoint[] | null, pixel?: { x: number; y: number }) => void;
+  showCrosshair?: boolean;
 }) {
   const [canvasUrl, setCanvasUrl] = useState("");
   const [status, setStatus] = useState("Preparing DSS2 + WISE layers…");
@@ -51,11 +75,11 @@ export default function MultiMissionCompositeCanvas({
         const layers = await Promise.all([
           ...buffers.map(({ frame, buffer }) => Promise.resolve({
             band: frame.band.toLowerCase().split(":").at(-1) ?? frame.band.toLowerCase(),
-            pixels: renderFitsChannel(buffer, centerRa, centerDec, fieldSizeDeg),
+            pixels: renderLayerCached(buffer, centerRa, centerDec, fieldSizeDeg),
           })),
           ...wiseFrames.map((frame) => Promise.resolve({
             band: frame.band.toLowerCase(),
-            pixels: renderFitsChannel(frame.buffer, centerRa, centerDec, fieldSizeDeg),
+            pixels: renderLayerCached(frame.buffer, centerRa, centerDec, fieldSizeDeg),
           })),
         ]);
         const extractors: Array<{ buffer: ArrayBuffer; wavelength: number }> = [];
@@ -127,5 +151,6 @@ export default function MultiMissionCompositeCanvas({
     inspectSpectrum(event.clientX, event.clientY, event.currentTarget);
   }}>
     {canvasUrl ? <img src={canvasUrl} alt="DSS2 optical and WISE infrared comparison composite" /> : <div className="image-blinker-empty">{status}</div>}
+    {showCrosshair && <div className="canvas-crosshair" aria-hidden="true"><i /><i /></div>}
   </div>;
 }

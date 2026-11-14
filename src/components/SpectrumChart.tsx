@@ -1,9 +1,12 @@
 "use client";
 
+import { useState } from "react";
+import { ChevronDown, ChevronUp } from "lucide-react";
 import { CartesianGrid, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import type { SpectrumPoint } from "../../utils/spectralCube";
 
 export default function SpectrumChart({ data, target, dataSource }: { data: SpectrumPoint[]; target?: string; dataSource?: string }) {
+  const [collapsed, setCollapsed] = useState(false);
   const exportCsv = () => {
     if (!data.length) return;
     const rows = ["wavelength_um,sky_subtracted_flux", ...data.map(({ wavelength, flux }) => `${wavelength},${flux}`)];
@@ -16,25 +19,25 @@ export default function SpectrumChart({ data, target, dataSource }: { data: Spec
     window.setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
   return (
-    <section className="spectrum-panel" aria-label="Extracted spectrum">
+    <section className={`spectrum-panel${collapsed ? " is-collapsed" : ""}`} aria-label="Extracted spectrum">
       <header className="spectrum-heading">
-        <div><h3>Live Spectrum{target ? ` · ${target}` : ""}</h3><p>Hover or click an image coordinate or nearby object</p>{dataSource && <span className={`spectrum-source-label${dataSource.startsWith("Live") ? " is-live" : " is-synthetic"}`}>{dataSource}</span>}</div>
-        <div className="spectrum-heading-actions"><span>μm · sky-subtracted flux</span><button type="button" onClick={exportCsv} disabled={!data.length}>Export CSV</button></div>
+        <div><h3>Live Spectrum{target ? ` · ${target}` : ""}</h3>{!collapsed && <><p>Hover or click an image coordinate or nearby object</p>{dataSource && <span className={`spectrum-source-label${dataSource.startsWith("Live") ? " is-live" : " is-synthetic"}`}>{dataSource}</span>}</>}</div>
+        <div className="spectrum-heading-actions"><span>μm · sky-subtracted flux</span><button type="button" onClick={exportCsv} disabled={!data.length}>Export CSV</button><button type="button" aria-label={collapsed ? "Expand live spectrum" : "Collapse live spectrum"} onClick={() => setCollapsed((value) => !value)}>{collapsed ? <ChevronUp size={14} /> : <ChevronDown size={14} />}</button></div>
       </header>
-      {data.length ? <div className="spectrum-chart">
+      {!collapsed && (data.length ? <div className="spectrum-chart">
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={data} margin={{ top: 10, right: 18, bottom: 4, left: 2 }}>
             <CartesianGrid stroke="#282b31" strokeDasharray="3 4" />
             <XAxis dataKey="wavelength" type="number" domain={["dataMin", "dataMax"]} tick={{ fill: "#9297a0", fontSize: 10 }} tickLine={false} axisLine={{ stroke: "#41444b" }} label={{ value: "Wavelength (μm)", position: "insideBottom", offset: -2, fill: "#a9aeb7", fontSize: 10 }} />
             <YAxis tick={{ fill: "#9297a0", fontSize: 10 }} tickLine={false} axisLine={false} width={52} label={{ value: "Flux", angle: -90, position: "insideLeft", fill: "#a9aeb7", fontSize: 10 }} />
             <Tooltip contentStyle={{ background: "#101216", border: "1px solid #383b43", borderRadius: 3, fontSize: 11 }} labelFormatter={(value) => `${Number(value).toFixed(4)} μm`} formatter={(value) => [Number(value).toPrecision(5), "Flux"]} />
-            <ReferenceLine x={3.0} stroke="#b8a9ff" strokeDasharray="4 4" label={{ value: "Water ice · 3.0 μm", fill: "#c5b9ee", fontSize: 9, position: "insideTopLeft" }} />
-            <ReferenceLine x={3.3} stroke="#8dcab4" strokeDasharray="4 4" label={{ value: "Methane · 3.3 μm", fill: "#8dcab4", fontSize: 9, position: "insideTop" }} />
-            <ReferenceLine x={4.67} stroke="#e4b77a" strokeDasharray="4 4" label={{ value: "CO · 4.67 μm", fill: "#e4b77a", fontSize: 9, position: "insideTopRight" }} />
-            <Line type="monotone" dataKey="flux" stroke="#c2b6ff" strokeWidth={1.5} dot={false} isAnimationActive={false} connectNulls />
+            <ReferenceLine x={3.0} stroke="#52616e" strokeDasharray="3 5" label={{ value: "H₂O Ice", fill: "#82909c", fontSize: 8, position: "insideTopLeft" }} />
+            <ReferenceLine x={3.3} stroke="#52616e" strokeDasharray="3 5" label={{ value: "CH₄", fill: "#82909c", fontSize: 8, position: "insideTop" }} />
+            <ReferenceLine x={4.26} stroke="#52616e" strokeDasharray="3 5" label={{ value: "CO₂", fill: "#82909c", fontSize: 8, position: "insideTopRight" }} />
+            <Line type="linear" dataKey="flux" stroke="#E2E8F0" strokeWidth={2} dot={{ r: 3, fill: "#E2E8F0", stroke: "#0B0E14", strokeWidth: 1 }} activeDot={{ r: 4, fill: "#fff", stroke: "#0B0E14", strokeWidth: 1 }} isAnimationActive={false} connectNulls />
           </LineChart>
         </ResponsiveContainer>
-      </div> : <div className="spectrum-empty">{dataSource ? dataSource.startsWith("Live") ? "Select a canvas coordinate or nearby source to extract its spectrum." : "Synthetic SED preview only. It is illustrative and must not be used as measured SPHEREx photometry." : "Waiting for WISE image data to prepare a labeled spectral preview. WISE frames alone do not contain wavelength-resolved spectra."}</div>}
+      </div> : <div className="spectrum-empty">{dataSource ? dataSource.startsWith("Live") ? "Select a canvas coordinate or nearby source to extract its spectrum." : "Synthetic SED preview only. It is illustrative and must not be used as measured SPHEREx photometry." : "Waiting for WISE image data to prepare a labeled spectral preview. WISE frames alone do not contain wavelength-resolved spectra."}</div>)}
     </section>
   );
 }
