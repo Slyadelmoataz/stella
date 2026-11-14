@@ -5,7 +5,7 @@ import path from "node:path";
 import { fitsCacheKey } from "@/lib/fitsCache";
 import { irsaCachePath } from "@/lib/irsaCachePath";
 import { irsaQueryCacheKey, readIrsaJsonCache, writeIrsaJsonCache } from "@/lib/irsaJsonCache";
-import { nativeHttpsGet } from "@/lib/nativeHttpsGet";
+import { nativeHttpsGet, nativeHttpsGetWithRetry } from "@/lib/nativeHttpsGet";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -201,10 +201,11 @@ async function fetchWiseRecords(ra: number, dec: number, size: number) {
   siaUrl.searchParams.set("DPTYPE", "image");
   siaUrl.searchParams.set("FORMAT", "image/fits");
   siaUrl.searchParams.set("RESPONSEFORMAT", "CSV");
-  siaUrl.searchParams.set("MAXREC", "100");
-  const response = await nativeHttpsGet(siaUrl, {
+  siaUrl.searchParams.set("MAXREC", "15");
+  const response = await nativeHttpsGetWithRetry(siaUrl, {
     allowedHosts: [IRSA_HOST],
-    timeoutMs: 20_000,
+    timeoutMs: 12_000,
+    retries: 1,
     maxBytes: 16 * 1024 * 1024,
     headers: { Accept: "text/csv" },
   });
@@ -282,9 +283,10 @@ async function fetchTimeSeriesRecords(ra: number, dec: number, size: number) {
     // Omit FORMAT: IBE defaults to matching rows; FORMAT=METADATA returns only
     // the schema. The response encoding is `ct`, not SIA's RESPONSEFORMAT.
     searchUrl.searchParams.set("ct", "CSV");
-    const response = await nativeHttpsGet(searchUrl, {
+    const response = await nativeHttpsGetWithRetry(searchUrl, {
       allowedHosts: [IRSA_HOST],
-      timeoutMs: 6_000,
+      timeoutMs: 12_000,
+      retries: 1,
       maxBytes: 32 * 1024 * 1024,
       headers: { Accept: "text/csv" },
     });
@@ -381,9 +383,10 @@ async function fetchSpherexCube(ra: number, dec: number) {
   siaUrl.searchParams.set("DPTYPE", "cube");
   siaUrl.searchParams.set("RESPONSEFORMAT", "CSV");
   siaUrl.searchParams.set("MAXREC", "1");
-  const response = await nativeHttpsGet(siaUrl, {
+  const response = await nativeHttpsGetWithRetry(siaUrl, {
     allowedHosts: [IRSA_HOST],
-    timeoutMs: 20_000,
+    timeoutMs: 12_000,
+    retries: 1,
     maxBytes: 16 * 1024 * 1024,
     headers: { Accept: "text/csv" },
   });

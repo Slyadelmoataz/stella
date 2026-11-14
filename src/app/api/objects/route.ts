@@ -12,7 +12,7 @@ const TAP_ENDPOINTS = [
   "https://simbad.cds.unistra.fr/simbad/sim-tap/sync",
 ];
 
-const MAX_RESULTS = 40;
+const MAX_RESULTS = 15;
 const EDGE_CACHE_CONTROL = "public, s-maxage=86400, stale-while-revalidate=604800";
 
 type TapResponse = {

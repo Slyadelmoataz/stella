@@ -19,6 +19,7 @@ type HttpsGetOptions = {
   maxBytes?: number;
   headers?: Record<string, string>;
   maxRedirects?: number;
+  signal?: AbortSignal;
 };
 
 /** Native HTTPS GET with IPv4 lookup, bounded redirects, and an inactivity timeout. */
@@ -38,7 +39,10 @@ export function nativeHttpsGet(input: string | URL, options: HttpsGetOptions): P
     const request = https.get(requestUrl, {
       agent: irsaAgent,
       family: 4,
-      timeout: timeoutMs,
+      // Retried requests are bounded by the AbortController timer below;
+      // avoid racing Node's separate socket timeout against that deadline.
+      timeout: options.signal ? 0 : timeoutMs,
+      signal: options.signal,
       headers: {
         ...(allowedHosts.has("irsa.ipac.caltech.edu")
           ? { Accept: "*/*", "User-Agent": IRSA_USER_AGENT }
@@ -87,4 +91,34 @@ export function nativeHttpsGet(input: string | URL, options: HttpsGetOptions): P
     });
     request.on("error", reject);
   });
+}
+
+/** Retry a bounded upstream request once without letting it occupy a worker indefinitely. */
+export async function nativeHttpsGetWithRetry(
+  input: string | URL,
+  options: HttpsGetOptions & { retries?: number },
+): Promise<NativeHttpsResponse> {
+  const { retries = 1, ...requestOptions } = options;
+  const timeoutMs = requestOptions.timeoutMs ?? 12_000;
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const controller = new AbortController();
+    const timeoutError = Object.assign(new Error(`HTTPS request timed out after ${timeoutMs}ms.`), { name: "TimeoutError" });
+    const timer = setTimeout(() => controller.abort(timeoutError), timeoutMs);
+    try {
+      return await nativeHttpsGet(input, {
+        ...requestOptions,
+        timeoutMs,
+        signal: controller.signal,
+      });
+    } catch (error) {
+      lastError = controller.signal.aborted ? timeoutError : error;
+      if (attempt === retries) throw lastError;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  throw lastError;
 }
