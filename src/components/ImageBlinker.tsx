@@ -602,7 +602,7 @@ export default function ImageBlinker({
   const comparisonReady = Boolean(frameA && frameB && frameBuffers?.[frameA.sourceIndex] && frameBuffers?.[frameB.sourceIndex]);
 
   return (
-    <section className="image-blinker" aria-label="Infrared image comparison">
+    <section className={`image-blinker${showPairTool ? " pair-tool-open" : ""}`} aria-label="Infrared image comparison">
       <div className={`band-window-selector${viewMode === "multimission" ? " is-minimal" : ""}`}>
         <div className="viewer-mode-toggle" role="group" aria-label="Image viewer mode">
           <button type="button" className={viewMode === "time" ? "active" : ""} aria-pressed={viewMode === "time"} onClick={() => setViewMode("time")}>Time Motion (WiseView)</button>
@@ -674,7 +674,16 @@ export default function ImageBlinker({
       </div>
 
       <div className="pair-tool-controls">
-        <button type="button" className="image-blinker-toggle" onClick={() => setShowPairTool((visible) => !visible)} aria-expanded={showPairTool}>{showPairTool ? "Close two-frame tool" : "Add two-frame tool"}</button>
+        <button type="button" className="image-blinker-toggle" onClick={(event) => {
+          const opening = !showPairTool;
+          const workbench = event.currentTarget.closest(".workbench-main");
+          const viewer = event.currentTarget.closest(".image-blinker");
+          setShowPairTool(opening);
+          if (opening) requestAnimationFrame(() => {
+            if (workbench) workbench.scrollTop = 0;
+            if (viewer) viewer.scrollTop = 0;
+          });
+        }} aria-expanded={showPairTool}>{showPairTool ? "Close two-frame tool" : "Add two-frame tool"}</button>
         {showPairTool && <>
           <label>Time difference <select value={timeGap} onChange={(event) => setTimeGap(Number(event.target.value))}>{Array.from({ length: Math.max(1, availableFrames.length - 1) }, (_, index) => index + 1).map((gap) => <option key={gap} value={gap}>{gap} frame{gap === 1 ? "" : "s"}{availableFrames[startIdx + gap]?.mjd ? ` · ${mjdLabel(availableFrames[startIdx + gap].mjd)}` : ""}</option>)}</select></label>
           <div className="difference-mode" role="group" aria-label="Two-frame arithmetic"><button type="button" className={pairOperation === "add" ? "active" : ""} aria-pressed={pairOperation === "add"} onClick={() => setPairOperation("add")}>Add</button><button type="button" className={pairOperation === "subtract" ? "active" : ""} aria-pressed={pairOperation === "subtract"} onClick={() => setPairOperation("subtract")}>Subtract</button></div>

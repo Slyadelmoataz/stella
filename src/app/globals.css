@@ -314,6 +314,10 @@ button, input, select, summary { -webkit-tap-highlight-color:transparent; }
 .target-preset-list button,.data-source-row,.locate-button,.share-link-button,.add-source-button { min-height:36px; }
 .inspector-content .text-input,.inspector-content select,.noise-reduction-select { min-height:36px; font-size:12px; }
 .range-input { min-height:24px; }
+.pair-tool-open { overflow-x:hidden; overflow-y:auto; overscroll-behavior:contain; overflow-anchor:none; scrollbar-color:#35404a #0B0E14; }
+.pair-result-view { width:100%; min-width:0; flex:0 0 auto; }
+.pair-result-view .image-blinker-frame { width:100%; min-width:0; min-height:0; height:min(40vh,360px); aspect-ratio:auto; flex:0 0 auto; }
+.pair-result-view .fits-canvas-viewer { width:100%; height:100%; min-width:0; min-height:0; }
 
 @media (max-width:680px) {
   .app-shell { height:100vh; height:100dvh; }
@@ -326,7 +330,7 @@ button, input, select, summary { -webkit-tap-highlight-color:transparent; }
   .telemetry-readout span:nth-child(2),.telemetry-readout span:nth-child(3),.telemetry-readout span:nth-child(4) { display:none; }
   .topbar-mode-tabs { flex:0 0 auto; }
   .topbar-mode-tabs button { max-width:none; height:32px; padding:0 7px; font-size:9px; line-height:1.15; }
-  .workbench-main { flex-direction:column; overflow-x:hidden; overflow-y:auto; overscroll-behavior:contain; scrollbar-color:#35404a #0B0E14; }
+  .workbench-main { flex-direction:column; overflow-x:hidden; overflow-y:auto; overscroll-behavior:contain; overflow-anchor:none; scrollbar-color:#35404a #0B0E14; }
   .workbench-display { flex:0 0 auto; height:calc(100dvh - 44px); min-height:520px; overflow:visible; }
   .viewport-title { flex-basis:36px; padding:0 8px; }
   .viewport-title > div { gap:4px; }
@@ -350,6 +354,9 @@ button, input, select, summary { -webkit-tap-highlight-color:transparent; }
   .epoch-source-strip { display:none; }
   .single-playback-view { flex:1 1 0; min-height:0; }
   .single-playback-view .image-blinker-frame { flex:1 1 0; min-height:72px; }
+  .pair-tool-open .single-playback-view { flex:0 0 auto; height:clamp(150px,26dvh,210px); }
+  .pair-tool-open .single-playback-view .image-blinker-frame { flex:1 1 auto; min-height:0; }
+  .pair-tool-open .pair-result-view .image-blinker-frame { height:clamp(170px,34dvh,250px); min-height:0; aspect-ratio:auto; }
   .compare-pane-header { flex-basis:24px; min-height:24px; padding:0 8px; }
   .compare-pane-header h3,.compare-pane-header time { font-size:9px; }
   .time-range-panel { display:grid; grid-template-columns:minmax(0,1fr); gap:3px; padding:4px 8px 3px; }
