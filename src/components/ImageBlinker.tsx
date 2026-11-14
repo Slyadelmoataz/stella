@@ -2,25 +2,37 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Pause, Play, Square } from "lucide-react";
-import FitsCanvasViewer, { measureFitsCoverage } from "@/components/FitsCanvasViewer";
+import FitsCanvasViewer, { measureFitsCoverage, precacheFitsFrame } from "@/components/FitsCanvasViewer";
 import SpectrumChart from "@/components/SpectrumChart";
 import SpectralCompositeCanvas, { SPHEREX_ARRAYS } from "@/components/SpectralCompositeCanvas";
-import { SpectralCube, type SpectrumPoint } from "../../utils/spectralCube";
+import MultiMissionCompositeCanvas, { type SurveyFrame, type WiseFrame } from "@/components/MultiMissionCompositeCanvas";
+import { SpectralCube, type NoiseReductionMode, type SpectrumPoint } from "../../utils/spectralCube";
 import { createOfflineModelSources, synthesizeCubeFromWise, type SedSource } from "../../utils/syntheticSpectralCube";
 
 export type ImageRecord = {
+  id?: string;
+  frameId?: string;
   url: string;
   band: string;
   mjd: number | null;
+  date?: string;
   source?: "allwise-atlas" | "single-exposure" | "synthetic-timeseries";
   syntheticShiftX?: number;
   syntheticShiftY?: number;
-  syntheticNoiseSeed?: number;
+  syntheticMotionFraction?: number;
+  syntheticMotionArcsecPerYear?: number;
+  syntheticObjectOffsetRaArcsec?: number;
+  syntheticObjectOffsetDecArcsec?: number;
+  sourceId?: string;
+  sourceName?: string;
+  agency?: string;
 };
 
 export type ImageBlinkerProps = {
   images: ImageRecord[];
+  sourceImages?: ImageRecord[];
   playbackSpeed?: number;
+  noiseReduction?: NoiseReductionMode;
   alt?: string;
   centerRa?: number;
   centerDec?: number;
@@ -33,6 +45,17 @@ export type ImageBlinkerProps = {
   simbadObjects?: SedSource[];
   irsaFailed?: boolean;
   onIrsaFailure?: () => void;
+  spherexEnabled?: boolean;
+  timeSeriesStatus?: string;
+  initialTimeline?: TimelineLinkState | null;
+  onTimelineStateChange?: (state: TimelineLinkState) => void;
+};
+
+export type TimelineLinkState = {
+  band: string;
+  view: "time" | "spherex" | "multimission";
+  from?: string;
+  to?: string;
 };
 
 type BandFrame = ImageRecord & { sourceIndex: number };
@@ -59,7 +82,9 @@ function mjdLabel(mjd: number | null | undefined) {
 
 export default function ImageBlinker({
   images,
+  sourceImages = [],
   playbackSpeed = 500,
+  noiseReduction = "off",
   alt = "Astronomical image",
   centerRa,
   centerDec,
@@ -72,24 +97,31 @@ export default function ImageBlinker({
   simbadObjects = [],
   irsaFailed = false,
   onIrsaFailure,
+  spherexEnabled = true,
+  timeSeriesStatus = "",
+  initialTimeline = null,
+  onTimelineStateChange,
 }: ImageBlinkerProps) {
   const [selectedBand, setSelectedBand] = useState("wise-w1");
   const [isPlaying, setIsPlaying] = useState(false);
   const [outlineChanges, setOutlineChanges] = useState(false);
   const [differenceMode, setDifferenceMode] = useState<"motion" | "brightness">("motion");
+  const [showPairTool, setShowPairTool] = useState(false);
+  const [pairOperation, setPairOperation] = useState<"add" | "subtract">("subtract");
+  const [timeGap, setTimeGap] = useState(1);
   const [rangeStart, setRangeStart] = useState(0);
   const [rangeEnd, setRangeEnd] = useState(1);
   const [frameBuffers, setFrameBuffers] = useState<(ArrayBuffer | null)[] | null>(null);
   const [failedCount, setFailedCount] = useState(0);
-  const [downloadedCount, setDownloadedCount] = useState(0);
-  const [selectedLimit, setSelectedLimit] = useState<number | null>(null);
   const [isDownloading, setIsDownloading] = useState(false);
   const [spectrum, setSpectrum] = useState<SpectrumPoint[] | null>(null);
   const [spectrumTarget, setSpectrumTarget] = useState("");
-  const [viewMode, setViewMode] = useState<"time" | "spherex">("time");
+  const [viewMode, setViewMode] = useState<"time" | "spherex" | "multimission">("time");
   const [redArray, setRedArray] = useState(5);
   const [greenArray, setGreenArray] = useState(3);
   const [blueArray, setBlueArray] = useState(1);
+  const [alphaArray, setAlphaArray] = useState(0);
+  const [rgbaEnabled, setRgbaEnabled] = useState(false);
   const [wiseSpatial, setWiseSpatial] = useState<{ width: number; height: number; values: Float32Array } | null>(null);
   const [irsaCube, setIrsaCube] = useState<SpectralCube | undefined>();
   const [cubeLoadError, setCubeLoadError] = useState("");
@@ -101,37 +133,103 @@ export default function ImageBlinker({
   const [coverageRevision, setCoverageRevision] = useState(0);
   const rejectedFramesRef = useRef(new Set<number>());
   const followLatestRef = useRef(true);
+  const initialRangeAppliedRef = useRef(false);
+
+  useEffect(() => {
+    if (!initialTimeline) return;
+    setSelectedBand(initialTimeline.band);
+    setViewMode(initialTimeline.view);
+  }, [initialTimeline]);
+
+  const playbackRecords = useMemo<BandFrame[]>(() => images
+    .map((image, sourceIndex) => ({ ...image, sourceIndex }))
+    .filter((image) => image.source === "single-exposure"), [images]);
 
   const bandGroups = useMemo<BandGroup[]>(() => {
     const grouped = new Map<string, BandFrame[]>();
-    for (const [sourceIndex, image] of images.entries()) {
+    for (const image of playbackRecords) {
       const frames = grouped.get(image.band) ?? [];
-      frames.push({ ...image, sourceIndex });
+      frames.push(image);
       grouped.set(image.band, frames);
     }
     return [...grouped].map(([band, frames]) => ({ band, frames }));
-  }, [images]);
+  }, [playbackRecords]);
 
-  const frameCount = images.length;
-  const frameLimit = Math.max(0, Math.min(frameCount, selectedLimit ?? frameCount));
+  const frameCount = playbackRecords.length;
+  const frameLimit = frameCount;
   const requestedDelay = Number.isFinite(playbackSpeed) ? playbackSpeed : 500;
   const intervalDelay = Math.min(1000, Math.max(100, requestedDelay));
   const selectedGroup = bandGroups.find(({ band }) => band === selectedBand);
   const selectedFrames = selectedGroup?.frames ?? [];
   const availableFrames = selectedFrames.filter(({ sourceIndex }) => Boolean(frameBuffers?.[sourceIndex]));
   const maxRangeIndex = Math.max(0, availableFrames.length - 1);
-  const safeStart = Math.min(rangeStart, Math.max(0, maxRangeIndex - 1));
+  const safeStart = Math.min(rangeStart, maxRangeIndex);
   const safeEnd = Math.max(safeStart + 1, Math.min(rangeEnd, maxRangeIndex));
-  const frameA = availableFrames[safeStart];
-  const frameB = availableFrames[safeEnd];
-  const syntheticTimeline = images.some((image) => image.source === "synthetic-timeseries");
-  const epochTransform = (frame: BandFrame | undefined) => frame?.source === "synthetic-timeseries" ? {
-    shiftX: frame.syntheticShiftX ?? 0,
-    shiftY: frame.syntheticShiftY ?? 0,
-    noiseSeed: frame.syntheticNoiseSeed ?? 0,
-  } : undefined;
+  const startIdx = safeStart;
+  const frameA = availableFrames[startIdx];
+  const endIdx = Math.min(maxRangeIndex, startIdx + timeGap);
+  const frameB = availableFrames[endIdx];
+  // Keep these object identities stable: FitsCanvasViewer uses them as render
+  // dependencies and reports its cached spatial plane back to this component.
+  const frameAEpoch = useMemo(() => frameA?.source === "synthetic-timeseries" ? {
+    shiftX: frameA.syntheticShiftX ?? 0,
+    shiftY: frameA.syntheticShiftY ?? 0,
+    motionFraction: frameA.syntheticMotionFraction ?? 0,
+    motionArcsecPerYear: frameA.syntheticMotionArcsecPerYear ?? 0,
+    objectOffsetRaArcsec: frameA.syntheticObjectOffsetRaArcsec ?? 0,
+    objectOffsetDecArcsec: frameA.syntheticObjectOffsetDecArcsec ?? 0,
+  } : undefined, [frameA]);
+  const frameBEpoch = useMemo(() => frameB?.source === "synthetic-timeseries" ? {
+    shiftX: frameB.syntheticShiftX ?? 0,
+    shiftY: frameB.syntheticShiftY ?? 0,
+    motionFraction: frameB.syntheticMotionFraction ?? 0,
+    motionArcsecPerYear: frameB.syntheticMotionArcsecPerYear ?? 0,
+    objectOffsetRaArcsec: frameB.syntheticObjectOffsetRaArcsec ?? 0,
+    objectOffsetDecArcsec: frameB.syntheticObjectOffsetDecArcsec ?? 0,
+  } : undefined, [frameB]);
+  const frameAKey = frameA ? `${frameA.id ?? frameA.frameId ?? frameA.url}:${frameA.mjd ?? frameA.date ?? ""}` : undefined;
+  const frameBKey = frameB ? `${frameB.id ?? frameB.frameId ?? frameB.url}:${frameB.mjd ?? frameB.date ?? ""}` : undefined;
+  const surveyCompositeFrames = useMemo<SurveyFrame[]>(() => sourceImages.filter((frame) => frame.sourceId && frame.sourceId !== "wise-neowise" && frame.sourceId !== "spherex-archive").map((frame) => ({ url: frame.url, band: frame.band, sourceId: frame.sourceId!, sourceName: frame.sourceName ?? frame.sourceId! })), [sourceImages]);
+  const wiseCompositeFrames = useMemo<WiseFrame[]>(() => {
+    const result: WiseFrame[] = [];
+    for (const band of ["wise-w1", "wise-w2"]) {
+      const index = images.findIndex((frame) => frame.band.toLowerCase() === band && Boolean(frameBuffers?.[images.indexOf(frame)]));
+      if (index >= 0 && frameBuffers?.[index]) result.push({ url: images[index].url, band, buffer: frameBuffers[index]! });
+    }
+    return result;
+  }, [frameBuffers, images]);
   const wavelengthLabel = wavelengthOptions.find(({ id }) => id === selectedBand)?.label ?? selectedBand;
-  const totalAvailable = frameBuffers?.filter(Boolean).length ?? 0;
+  const totalAvailable = playbackRecords.filter(({ sourceIndex }) => Boolean(frameBuffers?.[sourceIndex])).length;
+
+  useEffect(() => {
+    if (!initialTimeline || initialRangeAppliedRef.current || selectedBand !== initialTimeline.band) return;
+    if (!initialTimeline.from && !initialTimeline.to) {
+      initialRangeAppliedRef.current = true;
+      return;
+    }
+    if (isDownloading || !availableFrames.length) return;
+    const toMjd = (date: string | undefined) => date ? Date.parse(date) / 86_400_000 + 40_587 : NaN;
+    const nearestIndex = (mjd: number) => availableFrames.reduce((best, frame, index) => {
+      const bestMjd = availableFrames[best]?.mjd ?? Infinity;
+      const frameMjd = frame.mjd ?? Infinity;
+      return Math.abs(frameMjd - mjd) < Math.abs(bestMjd - mjd) ? index : best;
+    }, 0);
+    const fromMjd = toMjd(initialTimeline.from);
+    const toMjdValue = toMjd(initialTimeline.to);
+    const fromIndex = Number.isFinite(fromMjd) ? nearestIndex(fromMjd) : 0;
+    const toIndex = Number.isFinite(toMjdValue) ? nearestIndex(toMjdValue) : fromIndex + 1;
+    setRangeStart(fromIndex);
+    setTimeGap(Math.max(1, toIndex - fromIndex));
+    initialRangeAppliedRef.current = true;
+  }, [availableFrames, initialTimeline, isDownloading, selectedBand]);
+
+  useEffect(() => {
+    if (!onTimelineStateChange) return;
+    const frameDate = (frame: BandFrame | undefined) => frame?.date ?? (frame?.mjd === null || frame?.mjd === undefined
+      ? undefined
+      : new Date((frame.mjd - 40_587) * 86_400_000).toISOString());
+    onTimelineStateChange({ band: selectedBand, view: viewMode, from: frameDate(frameA), to: frameDate(frameB) });
+  }, [frameA?.date, frameA?.mjd, frameB?.date, frameB?.mjd, onTimelineStateChange, selectedBand, viewMode]);
 
   useEffect(() => {
     if (centerRa === undefined || centerDec === undefined || !frameBuffers) return;
@@ -162,6 +260,12 @@ export default function ImageBlinker({
   }, [coverageRevision, frameBuffers, selectedFrames]);
   useEffect(() => {
     if (viewMode !== "spherex") return;
+    if (!spherexEnabled) {
+      setIrsaCube(undefined);
+      setCubeLoadError("SPHEREx is disabled in Data Sources.");
+      setIsLoadingIrsaCube(false);
+      return;
+    }
     setIrsaCube(undefined);
     setCubeLoadError("");
     setSpherexImageCount(0);
@@ -213,7 +317,7 @@ export default function ImageBlinker({
       }
     })();
     return () => controller.abort();
-  }, [centerDec, centerRa, fieldSizeDeg, viewMode]);
+  }, [centerDec, centerRa, fieldSizeDeg, spherexEnabled, viewMode]);
 
   const generatedCube = useMemo(() => {
     if (irsaCube || spectralCube || (!wiseSpatial && !irsaFailed) || centerRa === undefined || centerDec === undefined) return undefined;
@@ -228,9 +332,11 @@ export default function ImageBlinker({
   const activeCube = irsaCube ?? spectralCube ?? generatedCube;
   const hasLiveCube = Boolean(irsaCube ?? spectralCube);
   const cubeLabel = hasLiveCube ? "Live IRSA SPHEREx Cube" : wiseSpatial ? "Synthesized from WISE + SIMBAD SED" : "Offline Gaussian Starfield · Model Only";
-  const offlineEpochFrame = useMemo(() => irsaFailed && activeCube
-    ? { id: `offline-${centerRa ?? 0}-${centerDec ?? 0}`, cube: activeCube }
-    : null, [activeCube, centerDec, centerRa, irsaFailed]);
+  useEffect(() => {
+    if (viewMode === "spherex" && cubeLoadError && (surveyCompositeFrames.length || wiseCompositeFrames.length)) {
+      setViewMode("multimission");
+    }
+  }, [cubeLoadError, surveyCompositeFrames.length, viewMode, wiseCompositeFrames.length]);
 
   useEffect(() => {
     if (availableFrames.length < 2) {
@@ -253,28 +359,53 @@ export default function ImageBlinker({
     const controller = new AbortController();
     controllerRef.current = controller;
     let active = true;
-    const buffers: (ArrayBuffer | null)[] = images.map((image) => frameBufferByUrlRef.current.get(image.url) ?? null);
+    const frameBuffer = (image: ImageRecord, source: ArrayBuffer) =>
+      image.source === "synthetic-timeseries" ? source.slice(0) : source;
+    const buffers: (ArrayBuffer | null)[] = images.map((image) => {
+      const cached = frameBufferByUrlRef.current.get(image.url);
+      return cached ? frameBuffer(image, cached) : null;
+    });
     rejectedFramesRef.current = new Set<number>();
     setFrameBuffers([...buffers]);
     setFailedCount(0);
-    setDownloadedCount(0);
-    setIsDownloading(buffers.slice(0, frameLimit).some((buffer) => !buffer));
+    setIsDownloading(playbackRecords.slice(0, frameLimit).some(({ sourceIndex }) => !buffers[sourceIndex]));
     if (!frameLimit) {
       setIsDownloading(false);
       return () => controller.abort();
     }
 
+    const validateCompleteFrame = (image: BandFrame, buffer: ArrayBuffer) => {
+      const coverage = measureFitsCoverage(buffer, centerRa, centerDec, fieldSizeDeg);
+      coverageByUrlRef.current.set(image.url, coverage);
+      if (coverage < 0.98) throw new Error(`Incomplete FITS cutout (${Math.round(coverage * 100)}% of the requested field covered).`);
+    };
+
+    let rejectedIncomplete = 0;
+    const rejectedIncompleteUrls = new Set<string>();
+    for (const image of playbackRecords.slice(0, frameLimit)) {
+      const buffer = buffers[image.sourceIndex];
+      if (!buffer) continue;
+      try { validateCompleteFrame(image, buffer); }
+      catch {
+        buffers[image.sourceIndex] = null;
+        frameBufferByUrlRef.current.delete(image.url);
+        rejectedIncompleteUrls.add(image.url);
+        rejectedIncomplete++;
+      }
+    }
+    setFailedCount(rejectedIncomplete);
+    setFrameBuffers([...buffers]);
+
     async function downloadFrameWithRetries(url: string): Promise<ArrayBuffer> {
       let lastError = new Error("Could not download this FITS frame.");
-      for (let attempt = 0; attempt < 3; attempt++) {
+      for (let attempt = 0; attempt < 4; attempt++) {
         try {
           const response = await fetch(url, { signal: controller.signal });
           if (!response.ok) {
             const retryAfter = Number(response.headers.get("retry-after"));
             const body = await response.json().catch(() => null) as { error?: string } | null;
             lastError = new Error(body?.error || `FITS download failed (${response.status}).`);
-            if (/timed out/i.test(lastError.message)) throw lastError;
-            if (attempt < 2) {
+            if (attempt < 3) {
               const delay = Number.isFinite(retryAfter) && retryAfter > 0
                 ? Math.min(retryAfter * 1000, 10_000)
                 : 800 * (attempt + 1);
@@ -287,8 +418,7 @@ export default function ImageBlinker({
         } catch (error) {
           if (controller.signal.aborted) throw error;
           lastError = error instanceof Error ? error : lastError;
-          if (/timed out/i.test(lastError.message)) throw lastError;
-          if (attempt === 2) throw lastError;
+          if (attempt === 3) throw lastError;
           await new Promise<void>((resolve) => window.setTimeout(resolve, 800 * (attempt + 1)));
         }
       }
@@ -296,27 +426,60 @@ export default function ImageBlinker({
     }
 
     async function downloadSelectedFrames() {
-      let failed = 0;
-      for (const [index, image] of images.slice(0, frameLimit).entries()) {
-        if (!buffers[index]) buffers[index] = frameBufferByUrlRef.current.get(image.url) ?? null;
-        if (buffers[index]) {
-          setDownloadedCount((count) => Math.max(count, index + 1));
+      let failed = rejectedIncomplete;
+      for (const [playbackIndex, image] of playbackRecords.slice(0, frameLimit).entries()) {
+        const sourceIndex = image.sourceIndex;
+        if (rejectedIncompleteUrls.has(image.url)) {
+          continue;
+        }
+        if (!buffers[sourceIndex]) {
+          const cached = frameBufferByUrlRef.current.get(image.url);
+          if (cached) buffers[sourceIndex] = frameBuffer(image, cached);
+        }
+        if (buffers[sourceIndex]) {
+          const frame = image;
+          const frameKey = `${frame.id ?? frame.frameId ?? frame.url}:${frame.mjd ?? frame.date ?? ""}`;
+          const epoch = frame.source === "synthetic-timeseries" ? {
+            shiftX: frame.syntheticShiftX ?? 0,
+            shiftY: frame.syntheticShiftY ?? 0,
+            motionFraction: frame.syntheticMotionFraction ?? 0,
+            motionArcsecPerYear: frame.syntheticMotionArcsecPerYear ?? 0,
+            objectOffsetRaArcsec: frame.syntheticObjectOffsetRaArcsec ?? 0,
+            objectOffsetDecArcsec: frame.syntheticObjectOffsetDecArcsec ?? 0,
+          } : undefined;
+          try {
+            precacheFitsFrame(buffers[sourceIndex]!, { frameCacheKey: frameKey, url: frame.url, centerRa, centerDec, fieldSizeDeg, syntheticEpoch: epoch, rawPixels: true, noiseReduction });
+          } catch { /* The viewer reports invalid FITS data when that frame is selected. */ }
           if (active && !controller.signal.aborted) setFrameBuffers([...buffers]);
           continue;
         }
         try {
-          buffers[index] = await downloadFrameWithRetries(image.url);
-          frameBufferByUrlRef.current.set(image.url, buffers[index]!);
+          const downloaded = await downloadFrameWithRetries(image.url);
+          validateCompleteFrame(image, downloaded);
+          frameBufferByUrlRef.current.set(image.url, downloaded);
+          buffers[sourceIndex] = frameBuffer(image, downloaded);
+          const frameKey = `${image.id ?? image.frameId ?? image.url}:${image.mjd ?? image.date ?? ""}`;
+          const epoch = image.source === "synthetic-timeseries" ? {
+            shiftX: image.syntheticShiftX ?? 0,
+            shiftY: image.syntheticShiftY ?? 0,
+            motionFraction: image.syntheticMotionFraction ?? 0,
+            motionArcsecPerYear: image.syntheticMotionArcsecPerYear ?? 0,
+            objectOffsetRaArcsec: image.syntheticObjectOffsetRaArcsec ?? 0,
+            objectOffsetDecArcsec: image.syntheticObjectOffsetDecArcsec ?? 0,
+          } : undefined;
+          try {
+            precacheFitsFrame(downloaded, { frameCacheKey: frameKey, url: image.url, centerRa, centerDec, fieldSizeDeg, syntheticEpoch: epoch, rawPixels: true, noiseReduction });
+          } catch { /* Keep the buffer; FITS errors are reported by the viewer on selection. */ }
         } catch (error) {
           if (controller.signal.aborted) break;
           failed++;
-          if (error instanceof Error && /timed out/i.test(error.message)) {
-            onIrsaFailure?.();
-            break;
+          if (error instanceof Error && error.message.startsWith("Incomplete FITS cutout")) {
+            rejectedIncompleteUrls.add(image.url);
+            frameBufferByUrlRef.current.delete(image.url);
           }
+          if (error instanceof Error && /timed out/i.test(error.message)) onIrsaFailure?.();
         }
         if (active && !controller.signal.aborted) {
-          setDownloadedCount(index + 1);
           setFailedCount(failed);
           setFrameBuffers([...buffers]);
         }
@@ -330,20 +493,17 @@ export default function ImageBlinker({
       controller.abort();
       if (controllerRef.current === controller) controllerRef.current = null;
     };
-  }, [frameLimit, images]);
+  }, [frameLimit, images, noiseReduction, playbackRecords]);
 
   useEffect(() => {
     if (!isPlaying || availableFrames.length < 2 || safeEnd <= safeStart) return;
-    const windowSize = safeEnd - safeStart;
     const intervalId = window.setInterval(() => {
       followLatestRef.current = false;
-      const latestStart = Math.max(0, availableFrames.length - 1 - windowSize);
-      const nextStart = safeStart < latestStart ? safeStart + 1 : 0;
+      const nextStart = safeStart < availableFrames.length - 1 ? safeStart + 1 : 0;
       setRangeStart(nextStart);
-      setRangeEnd(nextStart + windowSize);
     }, intervalDelay);
     return () => window.clearInterval(intervalId);
-  }, [availableFrames.length, intervalDelay, isPlaying, safeEnd, safeStart]);
+  }, [availableFrames.length, intervalDelay, isPlaying, safeStart]);
 
   useEffect(() => {
     setRangeStart(0);
@@ -357,7 +517,7 @@ export default function ImageBlinker({
   useEffect(() => {
     setSpectrum(null);
     setSpectrumTarget("");
-  }, [selectedBand]);
+  }, [selectedBand, viewMode]);
 
   useEffect(() => {
     setWiseSpatial(null);
@@ -404,135 +564,75 @@ export default function ImageBlinker({
       <div className="band-window-selector">
         <div className="viewer-mode-toggle" role="group" aria-label="Image viewer mode">
           <button type="button" className={viewMode === "time" ? "active" : ""} aria-pressed={viewMode === "time"} onClick={() => setViewMode("time")}>Time Motion (WiseView)</button>
-          <button type="button" className={viewMode === "spherex" ? "active" : ""} aria-pressed={viewMode === "spherex"} onClick={() => setViewMode("spherex")}>SPHEREx 6-Array RGB</button>
+          <button type="button" className={viewMode === "spherex" ? "active" : ""} aria-pressed={viewMode === "spherex"} disabled={!spherexEnabled} onClick={() => { setCubeLoadError(""); setViewMode("spherex"); }}>SPHEREx 6-Array RGB</button>
+          <button type="button" className={viewMode === "multimission" ? "active" : ""} aria-pressed={viewMode === "multimission"} onClick={() => setViewMode("multimission")}>Multi-mission IR RGB</button>
         </div>
         {viewMode === "time" ? <div className="viewer-sub-controls">
           <label htmlFor="infrared-band">Infrared wavelength</label>
           <select id="infrared-band" value={selectedBand} onChange={(event) => setSelectedBand(event.target.value)}>
             {wavelengthOptions.map(({ id, label }) => <option key={id} value={id}>{label}</option>)}
           </select>
-        </div> : <div className="rgb-mappings">
+        </div> : viewMode === "spherex" ? <div className="rgb-mappings">
           {([ ["R", redArray, setRedArray], ["G", greenArray, setGreenArray], ["B", blueArray, setBlueArray] ] as const).map(([channel, value, setValue]) => (
             <label key={channel} className={`rgb-mapping rgb-${channel.toLowerCase()}`}><span>{channel}</span><select aria-label={`${channel} color array`} value={value} onChange={(event) => setValue(Number(event.target.value))}>{SPHEREX_ARRAYS.map((array) => <option key={array.index} value={array.index}>{array.label}</option>)}</select></label>
           ))}
+          <label className="rgba-toggle"><input type="checkbox" checked={rgbaEnabled} onChange={(event) => setRgbaEnabled(event.target.checked)} /> RGBA</label>
+          {rgbaEnabled && <label className="rgb-mapping rgb-a"><span>A</span><select aria-label="Alpha array" value={alphaArray} onChange={(event) => setAlphaArray(Number(event.target.value))}>{SPHEREX_ARRAYS.map((array) => <option key={array.index} value={array.index}>{array.label}</option>)}</select></label>}
           <span className="rgb-grade-label">JWST-inspired · Rust / Gold / Sapphire</span>
-        </div>}
+        </div> : <div className="rgb-grade-label">DSS2 optical + WISE infrared</div>}
       </div>
 
       {viewMode === "spherex" ? <>
         <div className="spectral-source-strip">
           <span className={`spectral-source-badge${hasLiveCube ? " is-live" : " is-synthetic"}`}>{activeCube ? cubeLabel : "Waiting for WISE image data"}</span>
-          <span>{hasLiveCube ? "Observed 102-channel IRSA cube" : isLoadingIrsaCube ? "Searching IRSA for observed channels… model fallback is visualization only" : cubeLoadError ? `IRSA cube unavailable · ${cubeLoadError} · model fallback is visualization only` : spherexImageCount ? `${spherexImageCount} IRSA spectral-image cutout${spherexImageCount === 1 ? "" : "s"} found · model fallback is visualization only` : "Model spectrum · not calibrated for science"}</span>
+          <span>{hasLiveCube ? "Observed data" : isLoadingIrsaCube ? "Searching archive · model fallback is visualization only" : cubeLoadError ? `Archive unavailable · model fallback is visualization only` : spherexImageCount ? "Spectral cutouts found · model fallback is visualization only" : "Model · not calibrated for science"}</span>
         </div>
-        <SpectralCompositeCanvas cube={activeCube} redArray={redArray} greenArray={greenArray} blueArray={blueArray} zoom={zoom} panOffset={panOffset} onPanChange={onPanChange} onSpectrumChange={handleCanvasSpectrum} />
+        <SpectralCompositeCanvas cube={activeCube} redArray={redArray} greenArray={greenArray} blueArray={blueArray} alphaArray={rgbaEnabled ? alphaArray : undefined} noiseReduction={noiseReduction} zoom={zoom} panOffset={panOffset} onPanChange={onPanChange} onSpectrumChange={handleCanvasSpectrum} />
         {!wiseSpatial && frameA && frameBuffers?.[frameA.sourceIndex] && (
           <div className="cube-spatial-source" aria-hidden="true">
-            <FitsCanvasViewer buffer={frameBuffers[frameA.sourceIndex]!} url={frameA.url} centerRa={centerRa} centerDec={centerDec} fieldSizeDeg={fieldSizeDeg} alt="WISE spatial source for model cube" onSpatialImage={(width, height, values) => setWiseSpatial({ width, height, values })} />
+            <FitsCanvasViewer frameCacheKey={frameAKey} buffer={frameBuffers[frameA.sourceIndex]!} url={frameA.url} centerRa={centerRa} centerDec={centerDec} fieldSizeDeg={fieldSizeDeg} noiseReduction={noiseReduction} alt="WISE spatial source for model cube" onSpatialImage={(width, height, values) => setWiseSpatial((current) => current?.values === values ? current : { width, height, values })} />
           </div>
         )}
+      </> : viewMode === "multimission" ? <>
+      <div className="spectral-source-strip"><span className="spectral-source-badge is-live">DSS2 + WISE survey composite</span><span>Independent survey images · not calibrated SPHEREx data</span></div>
+        <MultiMissionCompositeCanvas surveyFrames={surveyCompositeFrames} wiseFrames={wiseCompositeFrames} centerRa={centerRa} centerDec={centerDec} fieldSizeDeg={fieldSizeDeg} onSpectrumChange={handleCanvasSpectrum} />
       </> : <>
-      {offlineEpochFrame && <div className="spectral-source-strip"><span className="spectral-source-badge is-synthetic">{cubeLabel}</span><span>IRSA timed out · illustrative model only</span></div>}
-      {syntheticTimeline && <div className="spectral-source-strip"><span className="spectral-source-badge is-synthetic">Illustrative timeline · model only</span><span>Epoch labels and subtle noise are illustrative; the frames reuse an AllWISE cutout and show no measured motion.</span></div>}
-      <div className="comparison-grid">
-        <article className="compare-pane">
-          <header className="compare-pane-header"><h3>Image A</h3><time>{mjdLabel(frameA?.mjd)}</time></header>
-          <div className="image-blinker-frame">
-            {frameA && frameBuffers?.[frameA.sourceIndex] ? (
-            <FitsCanvasViewer buffer={frameBuffers[frameA.sourceIndex]!} url={frameA.url} centerRa={centerRa} centerDec={centerDec} fieldSizeDeg={fieldSizeDeg} zoom={zoom} panOffset={panOffset} onPanChange={onPanChange} syntheticEpoch={epochTransform(frameA)} onFrameRejected={() => rejectFrame(frameA.sourceIndex)} spectralCube={activeCube} onSpectrumChange={handleCanvasSpectrum} onSpatialImage={(width, height, values) => setWiseSpatial({ width, height, values })} alt={`${alt}, ${wavelengthLabel}, image A`} />
-            ) : offlineEpochFrame ? (
-              <FitsCanvasViewer key={offlineEpochFrame.id} syntheticCube={offlineEpochFrame.cube} spectralCube={offlineEpochFrame.cube} onSpectrumChange={handleCanvasSpectrum} alt="Offline synthetic starfield" />
-            ) : <div className="image-blinker-empty">{isDownloading ? "Receiving comparison frames…" : "Select a range with two available frames."}</div>}
-          </div>
-        </article>
-        <article className="compare-pane">
-          <header className="compare-pane-header"><h3>Image B</h3><time>{mjdLabel(frameB?.mjd)}</time></header>
-          <div className="image-blinker-frame">
-            {frameB && frameBuffers?.[frameB.sourceIndex] ? (
-            <FitsCanvasViewer buffer={frameBuffers[frameB.sourceIndex]!} url={frameB.url} centerRa={centerRa} centerDec={centerDec} fieldSizeDeg={fieldSizeDeg} zoom={zoom} panOffset={panOffset} onPanChange={onPanChange} syntheticEpoch={epochTransform(frameB)} onFrameRejected={() => rejectFrame(frameB.sourceIndex)} spectralCube={activeCube} onSpectrumChange={handleCanvasSpectrum} alt={`${alt}, ${wavelengthLabel}, image B`} />
-            ) : offlineEpochFrame ? (
-              <FitsCanvasViewer key={`${offlineEpochFrame.id}-b`} syntheticCube={offlineEpochFrame.cube} spectralCube={offlineEpochFrame.cube} onSpectrumChange={handleCanvasSpectrum} alt="Offline synthetic starfield" />
-            ) : <div className="image-blinker-empty">{isDownloading ? "Receiving comparison frames…" : "Select a range with two available frames."}</div>}
-          </div>
-        </article>
-        <article className="compare-pane difference-pane">
-          <header className="compare-pane-header">
-            <h3>{differenceMode === "motion" ? "Motion · |B − A|" : "Brightness · B − A"}</h3>
-            <div className="difference-actions">
-              <div className="difference-mode" role="group" aria-label="Difference display mode">
-                <button type="button" className={differenceMode === "motion" ? "active" : ""} aria-pressed={differenceMode === "motion"} onClick={() => setDifferenceMode("motion")}>Motion</button>
-                <button type="button" className={differenceMode === "brightness" ? "active" : ""} aria-pressed={differenceMode === "brightness"} onClick={() => setDifferenceMode("brightness")}>Brightness</button>
-              </div>
-              <label className="outline-toggle"><input type="checkbox" checked={outlineChanges} onChange={(event) => setOutlineChanges(event.target.checked)} /> Outline</label>
-            </div>
-          </header>
-          <div className="image-blinker-frame">
-            {comparisonReady ? (
-              <FitsCanvasViewer
-                key={`${selectedBand}-difference`}
-                buffer={frameBuffers![frameB!.sourceIndex]!}
-                compareBuffer={frameBuffers![frameA!.sourceIndex]!}
-                syntheticEpoch={epochTransform(frameB!)}
-                compareSyntheticEpoch={epochTransform(frameA!)}
-                showOutline={outlineChanges}
-                differenceMode={differenceMode}
-                spectralCube={activeCube}
-                onSpectrumChange={handleCanvasSpectrum}
-                onFrameRejected={() => rejectFrame(frameB!.sourceIndex)}
-                onCompareFrameRejected={() => rejectFrame(frameA!.sourceIndex)}
-                centerRa={centerRa}
-                centerDec={centerDec}
-                fieldSizeDeg={fieldSizeDeg}
-                zoom={zoom}
-                panOffset={panOffset}
-                onPanChange={onPanChange}
-                alt={`${alt}, ${wavelengthLabel}, difference image`}
-              />
-            ) : <div className="image-blinker-empty">Difference view appears when both images are available.</div>}
-          </div>
-          <div className="difference-legend">
-            {differenceMode === "motion" ? <span><i className="motion-mark" /> Absolute subtraction · changes in either direction</span> : <><span><i className="dimmer-mark" /> Dimmer in B</span><span><i className="brighter-mark" /> Brighter in B</span></>}
-          </div>
-        </article>
+      <div className="spectral-source-strip"><span className="spectral-source-badge is-live">WISE / NEOWISE single exposures</span></div>
+      <div className="single-playback-view">
+        <header className="compare-pane-header"><h3>{frameA ? `Frame ${startIdx + 1} / ${availableFrames.length}` : "Time-series playback"}</h3><time>{mjdLabel(frameA?.mjd)}</time></header>
+        <div className="image-blinker-frame">
+          {frameA && frameBuffers?.[frameA.sourceIndex] ? <FitsCanvasViewer key={`playback:${frameAKey}`} frameCacheKey={frameAKey} buffer={frameBuffers[frameA.sourceIndex]!} url={frameA.url} centerRa={centerRa} centerDec={centerDec} fieldSizeDeg={fieldSizeDeg} zoom={zoom} panOffset={panOffset} onPanChange={onPanChange} rawPixels noiseReduction={noiseReduction} onFrameRejected={() => rejectFrame(frameA.sourceIndex)} spectralCube={activeCube} onSpectrumChange={handleCanvasSpectrum} onSpatialImage={(width, height, values) => setWiseSpatial((current) => current?.values === values ? current : { width, height, values })} alt={`${alt}, ${wavelengthLabel}, ${mjdLabel(frameA.mjd)}`} /> : <div className="image-blinker-empty">{isDownloading ? "Receiving NASA frames…" : timeSeriesStatus || "No NASA single-exposure frames available for this position."}</div>}
+        </div>
       </div>
 
       <div className="time-range-panel">
-        <div className="time-range-heading"><span>Comparison time range · {wavelengthLabel}</span><output>{mjdLabel(frameA?.mjd)} — {mjdLabel(frameB?.mjd)}</output></div>
-        <div className="time-range-values"><span>A · {mjdLabel(frameA?.mjd)}</span><span>B · {mjdLabel(frameB?.mjd)}</span></div>
-        <div className="dual-range" style={{ "--range-start": `${availableFrames.length > 1 ? safeStart / (availableFrames.length - 1) * 100 : 0}%`, "--range-end": `${availableFrames.length > 1 ? safeEnd / (availableFrames.length - 1) * 100 : 100}%` } as React.CSSProperties}>
-          <div className="dual-range-track" />
-          <div className="dual-range-selection" />
-          <input aria-label="Earlier comparison date" type="range" min="0" max={maxRangeIndex} step="1" value={safeStart} disabled={availableFrames.length < 2} onChange={(event) => {
-            followLatestRef.current = false;
-            setRangeStart(Math.min(Number(event.target.value), safeEnd - 1));
-          }} />
-          <input aria-label="Later comparison date" type="range" min="0" max={maxRangeIndex} step="1" value={safeEnd} disabled={availableFrames.length < 2} onChange={(event) => {
-            followLatestRef.current = false;
-            setRangeEnd(Math.max(Number(event.target.value), safeStart + 1));
-          }} />
-        </div>
+        <input aria-label="Playback frame" className="range-input playback-timeline" type="range" min="0" max={maxRangeIndex} step="1" value={safeStart} disabled={availableFrames.length < 2} onChange={(event) => { followLatestRef.current = false; setRangeStart(Number(event.target.value)); }} />
         <div className="time-range-footer">
-          <button className="image-blinker-toggle" type="button" onClick={() => setIsPlaying((playing) => !playing)} disabled={!comparisonReady || safeEnd <= safeStart} aria-pressed={isPlaying}>
-            {isPlaying ? <Pause size={14} /> : <Play size={14} />}<span>{isPlaying ? "Pause range" : "Play range"}</span>
+          <button className="image-blinker-toggle" type="button" onClick={() => setIsPlaying((playing) => !playing)} disabled={availableFrames.length < 2} aria-pressed={isPlaying}>
+            {isPlaying ? <Pause size={14} /> : <Play size={14} />}<span>{isPlaying ? "Pause playback" : isDownloading ? "Preparing frames…" : "Play video"}</span>
           </button>
           <span>{availableFrames.length} dated frames available for this band</span>
         </div>
       </div>
+
+      <div className="pair-tool-controls">
+        <button type="button" className="image-blinker-toggle" onClick={() => setShowPairTool((visible) => !visible)} aria-expanded={showPairTool}>{showPairTool ? "Close two-frame tool" : "Add two-frame tool"}</button>
+        {showPairTool && <>
+          <label>Time difference <select value={timeGap} onChange={(event) => setTimeGap(Number(event.target.value))}>{Array.from({ length: Math.max(1, availableFrames.length - 1) }, (_, index) => index + 1).map((gap) => <option key={gap} value={gap}>{gap} frame{gap === 1 ? "" : "s"}{availableFrames[startIdx + gap]?.mjd ? ` · ${mjdLabel(availableFrames[startIdx + gap].mjd)}` : ""}</option>)}</select></label>
+          <div className="difference-mode" role="group" aria-label="Two-frame arithmetic"><button type="button" className={pairOperation === "add" ? "active" : ""} aria-pressed={pairOperation === "add"} onClick={() => setPairOperation("add")}>Add</button><button type="button" className={pairOperation === "subtract" ? "active" : ""} aria-pressed={pairOperation === "subtract"} onClick={() => setPairOperation("subtract")}>Subtract</button></div>
+          <span>{mjdLabel(frameA?.mjd)} → {mjdLabel(frameB?.mjd)}</span>
+        </>}
+      </div>
+      {showPairTool && comparisonReady && <div className="pair-result-view"><header className="compare-pane-header"><h3>{pairOperation === "add" ? "A + B" : "|B − A|"}</h3><time>{mjdLabel(frameA?.mjd)} → {mjdLabel(frameB?.mjd)}</time></header><div className="image-blinker-frame"><FitsCanvasViewer key={`pair:${pairOperation}:${frameAKey}:${frameBKey}`} frameCacheKey={frameBKey} compareFrameCacheKey={frameAKey} buffer={frameBuffers![frameB!.sourceIndex]!} compareBuffer={frameBuffers![frameA!.sourceIndex]!} syntheticEpoch={frameBEpoch} compareSyntheticEpoch={frameAEpoch} differenceMode={pairOperation === "add" ? "add" : "motion"} noiseReduction={noiseReduction} centerRa={centerRa} centerDec={centerDec} fieldSizeDeg={fieldSizeDeg} zoom={zoom} panOffset={{ x: 0, y: 0 }} alt={`${pairOperation} of frames ${mjdLabel(frameA?.mjd)} and ${mjdLabel(frameB?.mjd)}`} /></div></div>}
 
       <div className="image-blinker-controls">
         <span className="image-blinker-count">{totalAvailable}/{frameLimit} frames received{failedCount ? ` · ${failedCount} skipped or failed` : ""}</span>
         {isDownloading && <button className="image-blinker-toggle" type="button" onClick={() => { setIsDownloading(false); controllerRef.current?.abort(); }} aria-label="Stop downloading frames"><Square size={13} /><span>Stop</span></button>}
       </div>
       <div className="image-blinker-limit">
-        <label htmlFor="frame-limit">Frames to receive <output>{frameLimit}</output></label>
-        <input id="frame-limit" className="range-input" type="range" min="1" max={Math.max(1, frameCount)} step="1" value={Math.max(1, frameLimit)} disabled={!frameCount} onChange={(event) => {
-          const limit = Number(event.target.value);
-          setSelectedLimit(limit >= frameCount ? null : limit);
-        }} />
-        <div className="range-ends"><span>1 frame</span><span>{frameCount} frames</span></div>
-        {downloadedCount === 0 && frameCount > 0 && !isDownloading && <p className="image-blinker-empty">No frames have arrived yet.</p>}
       </div>
       </>}
-      <SpectrumChart data={spectrum ?? []} target={spectrumTarget} dataSource={activeCube ? cubeLabel : undefined} />
+      <SpectrumChart data={spectrum ?? []} target={spectrumTarget} dataSource={viewMode === "multimission" ? "Live DSS2 + WISE survey bands · approximate wavelengths" : activeCube ? cubeLabel : undefined} />
     </section>
   );
 }

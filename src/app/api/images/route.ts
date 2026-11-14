@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { setDefaultResultOrder } from "node:dns";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { fitsCacheKey, readFitsCache, writeFitsCache } from "@/lib/fitsCache";
+import { fitsCacheKey } from "@/lib/fitsCache";
 import { irsaQueryCacheKey, readIrsaJsonCache, writeIrsaJsonCache } from "@/lib/irsaJsonCache";
 import { nativeHttpsGet } from "@/lib/nativeHttpsGet";
 
@@ -75,27 +75,30 @@ function csvRows(csv: string): string[][] {
 }
 
 type ImageRecord = {
+  id?: string;
+  frameId?: string;
   url: string;
   band: string;
   mjd: number | null;
+  date?: string;
   source?: "allwise-atlas" | "single-exposure" | "synthetic-timeseries";
   syntheticShiftX?: number;
   syntheticShiftY?: number;
-  syntheticNoiseSeed?: number;
+  syntheticMotionFraction?: number;
+  syntheticMotionArcsecPerYear?: number;
+  syntheticObjectOffsetRaArcsec?: number;
+  syntheticObjectOffsetDecArcsec?: number;
 };
 type ExposureRecord = { upstreamUrl: string; band: string; mjd: number; distance: number; quality: number };
-type FitsDimensions = { width: number; height: number };
 export type SpherexCubeRecord = { url: string; ra: number; dec: number; pixelScaleArcsec: number | null };
 
-const MAX_FITS_BYTES = 20 * 1024 * 1024;
-const TIME_SERIES_DOWNLOAD_CONCURRENCY = 1;
-const SIX_MONTHS_MS = 182.62125 * 86_400_000;
+const TIME_SERIES_CUTOUT_MARGIN = 1.5;
 const FIRST_EPOCH_MS = Date.UTC(2010, 0, 1);
 const LAST_EPOCH_MS = Date.UTC(2024, 11, 31);
 const TIMESERIES_CACHE_DIR = path.join(process.cwd(), ".cache", "irsa");
 type TimeSeriesPayload = {
   status: 200;
-  cacheVersion?: 5;
+  cacheVersion?: 12;
   images: ImageRecord[];
   total: number;
   failed: number;
@@ -113,7 +116,7 @@ function timeSeriesCachePath(ra: number, dec: number, size: number) {
 async function readTimeSeriesCache(ra: number, dec: number, size: number): Promise<TimeSeriesPayload | null> {
   try {
     const data = JSON.parse(await readFile(timeSeriesCachePath(ra, dec, size), "utf8")) as TimeSeriesPayload;
-    return data.status === 200 && data.cacheVersion === 5 && Array.isArray(data.images) && data.images.length > 0 ? data : null;
+    return data.status === 200 && data.cacheVersion === 12 && Array.isArray(data.images) && data.images.length > 0 ? data : null;
   } catch {
     return null;
   }
@@ -124,66 +127,16 @@ async function writeTimeSeriesCache(ra: number, dec: number, size: number, data:
   await mkdir(TIMESERIES_CACHE_DIR, { recursive: true });
   const destination = timeSeriesCachePath(ra, dec, size);
   const temporary = `${destination}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(temporary, JSON.stringify({ ...data, cacheVersion: 5 }), { flag: "wx" });
+  await writeFile(temporary, JSON.stringify({ ...data, cacheVersion: 12 }), { flag: "wx" });
   await rename(temporary, destination);
 }
 
-function fitsImageDimensions(bytes: Uint8Array): FitsDimensions | null {
-  const blockSize = 2880;
-  let offset = 0;
-  while (offset + blockSize <= bytes.byteLength) {
-    const cards = new Map<string, string>();
-    let headerEnd = offset;
-    let foundEnd = false;
-    while (headerEnd + blockSize <= bytes.byteLength && !foundEnd) {
-      const blockEnd = headerEnd + blockSize;
-      for (let cardOffset = headerEnd; cardOffset < blockEnd; cardOffset += 80) {
-        const card = String.fromCharCode(...bytes.subarray(cardOffset, cardOffset + 80));
-        const key = card.slice(0, 8).trim();
-        if (key === "END") {
-          headerEnd = cardOffset + 80;
-          foundEnd = true;
-          break;
-        }
-        if (card[8] === "=") cards.set(key, card.slice(10).split("/")[0].trim());
-      }
-      if (!foundEnd) headerEnd = blockEnd;
-    }
-    if (!foundEnd) return null;
-    const value = (key: string, fallback = 0) => Number(cards.get(key) ?? fallback);
-    const axes = value("NAXIS");
-    const bitpix = value("BITPIX");
-    const width = value("NAXIS1");
-    const height = value("NAXIS2");
-    const extension = (cards.get("XTENSION") ?? "").replace(/^['"]|['"]$/g, "").trim().toUpperCase();
-    if ((offset === 0 || extension === "IMAGE") && axes >= 2 && width > 0 && height > 0) return { width, height };
-
-    let elements = axes > 0 ? 1 : 0;
-    for (let axis = 1; axis <= axes; axis++) elements *= value(`NAXIS${axis}`);
-    const dataLength = (elements * Math.abs(bitpix) / 8 + value("PCOUNT")) * value("GCOUNT", 1);
-    if (!Number.isFinite(dataLength) || dataLength < 0) return null;
-    offset = headerEnd + Math.ceil(dataLength / blockSize) * blockSize;
-  }
-  return null;
-}
-
-function medianDimension(dimensions: FitsDimensions[], key: keyof FitsDimensions) {
-  const values = dimensions.map((dimension) => dimension[key]).sort((a, b) => a - b);
-  const middle = Math.floor(values.length / 2);
-  return values.length % 2 ? values[middle] : (values[middle - 1] + values[middle]) / 2;
-}
-
 function finalizeExposureRecords(records: ExposureRecord[]) {
-  const bestByEpoch = new Map<string, ExposureRecord>();
-  for (const record of records) {
-    const epoch = Math.floor(((record.mjd - 40_587) * 86_400_000 - FIRST_EPOCH_MS) / SIX_MONTHS_MS);
-    const key = `${record.band}:${epoch}`;
-    const current = bestByEpoch.get(key);
-    if (!current || record.quality > current.quality ||
-      (record.quality === current.quality && record.distance < current.distance) ||
-      (record.quality === current.quality && record.distance === current.distance && record.mjd < current.mjd)) bestByEpoch.set(key, record);
-  }
-  return [...bestByEpoch.values()].sort((a, b) => a.mjd - b.mjd || a.band.localeCompare(b.band));
+  // Keep each distinct detector exposure. The viewer validates full field
+  // coverage after download, so this metadata pass does not collapse the many
+  // real exposures collected during each six-month sky pass.
+  return [...new Map(records.map((record) => [record.upstreamUrl, record])).values()]
+    .sort((a, b) => a.mjd - b.mjd || a.band.localeCompare(b.band));
 }
 
 function imageRecordsFromCsv(csv: string, ra: number, dec: number, size: number): ImageRecord[] {
@@ -256,29 +209,11 @@ async function fetchWiseRecords(ra: number, dec: number, size: number) {
   return imageRecordsFromCsv(csv, ra, dec, size);
 }
 
-function rowsFromIbeJson(json: string): Record<string, unknown>[] {
-  const parsed: unknown = JSON.parse(json);
-  if (Array.isArray(parsed)) return parsed.filter((row): row is Record<string, unknown> => Boolean(row && typeof row === "object" && !Array.isArray(row)));
-  if (!parsed || typeof parsed !== "object") throw new Error("IRSA returned an invalid JSON image-search response.");
-  const root = parsed as Record<string, unknown>;
-  const candidates = [root.data, root.result, root.rows, root.results];
-  const nested = candidates.find((candidate) => Array.isArray(candidate) && candidate.length > 0)
-    ?? candidates.find((candidate) => Boolean(candidate && typeof candidate === "object"));
-  const nestedObject = nested && !Array.isArray(nested) ? nested as Record<string, unknown> : null;
-  const data = Array.isArray(nested) ? nested : nestedObject
-    ? [nestedObject.rows, nestedObject.data, nestedObject.table].find(Array.isArray) as unknown[] | undefined
-    : undefined;
-  if (!data) throw new Error("IRSA JSON response did not contain image-search rows.");
-  const objectRows = data.filter((row): row is Record<string, unknown> => Boolean(row && typeof row === "object" && !Array.isArray(row)));
-  if (objectRows.length) return objectRows;
-  const columnsRaw = root.columns ?? root.columnNames ?? root.header ?? nestedObject?.columns ?? nestedObject?.columnNames;
-  const columns = Array.isArray(columnsRaw)
-    ? columnsRaw.map((column) => typeof column === "string" ? column.toLowerCase() : String((column as Record<string, unknown>)?.name ?? "").toLowerCase())
-    : [];
-  if (columns.length && data.every(Array.isArray)) {
-    return (data as unknown[][]).map((values) => Object.fromEntries(columns.map((column, index) => [column, values[index]])));
-  }
-  return [];
+function rowsFromIbeCsv(csv: string): Record<string, unknown>[] {
+  const [header, ...rows] = csvRows(csv);
+  if (!header) return [];
+  const columns = header.map((column) => column.trim().toLowerCase());
+  return rows.map((row) => Object.fromEntries(columns.map((column, index) => [column, row[index] ?? ""])));
 }
 
 function exposureRecordsFromRows(rows: Record<string, unknown>[], dataSet: "neowiser" | "allsky", ra: number, dec: number, size: number): ExposureRecord[] {
@@ -293,7 +228,7 @@ function exposureRecordsFromRows(rows: Record<string, unknown>[], dataSet: "neow
     return Number.isFinite(date.getTime()) ? date.getTime() / 86_400_000 + 40_587 : NaN;
   };
   const allowedBands = dataSet === "allsky" ? [1, 2, 3, 4] : [1, 2];
-  const bestByEpoch = new Map<string, ExposureRecord>();
+  const records: ExposureRecord[] = [];
   for (const row of rows) {
     const scanId = String(value(row, "scan_id") ?? "").trim();
     const frameNumber = Number(value(row, "frame_num"));
@@ -308,7 +243,6 @@ function exposureRecordsFromRows(rows: Record<string, unknown>[], dataSet: "neow
 
     const observedAt = (mjd - 40_587) * 86_400_000;
     if (observedAt < FIRST_EPOCH_MS || observedAt > LAST_EPOCH_MS) continue;
-    const epoch = Math.floor((observedAt - FIRST_EPOCH_MS) / SIX_MONTHS_MS);
     const raDistance = Number.isFinite(observedRa) ? ((observedRa - ra + 540) % 360 - 180) * Math.cos(dec * Math.PI / 180) : 0;
     const decDistance = Number.isFinite(observedDec) ? observedDec - dec : 0;
     const distance = raDistance * raDistance + decDistance * decDistance;
@@ -316,16 +250,14 @@ function exposureRecordsFromRows(rows: Record<string, unknown>[], dataSet: "neow
     const imagePath = `/ibe/data/wise/${dataSet}/${dataSet === "neowiser" ? "p1bm_frm" : "4band_p1bm_frm"}/${scanId.slice(-2)}/${scanId}/${frame}/${scanId}${frame}-w${bandNumber}-int-1b.fits`;
     const fitsUrl = new URL(imagePath, `https://${IRSA_HOST}`);
     fitsUrl.searchParams.set("center", `${ra},${dec}`);
-    fitsUrl.searchParams.set("size", `${size}deg`);
+    // The native detector frame is rotated. Fetch a margin around the requested
+    // field so WCS reprojection can fill its north-up corners without clipping.
+    fitsUrl.searchParams.set("size", `${size * TIME_SERIES_CUTOUT_MARGIN}deg`);
     fitsUrl.searchParams.set("gzip", "false");
     const candidate = { upstreamUrl: fitsUrl.toString(), band: `wise-w${bandNumber}`, mjd, distance, quality };
-    const epochKey = `${bandNumber}:${epoch}`;
-    const current = bestByEpoch.get(epochKey);
-    if (!current || candidate.quality > current.quality ||
-      (candidate.quality === current.quality && candidate.distance < current.distance) ||
-      (candidate.quality === current.quality && candidate.distance === current.distance && candidate.mjd < current.mjd)) bestByEpoch.set(epochKey, candidate);
+    records.push(candidate);
   }
-  return [...bestByEpoch.values()].sort((a, b) => a.mjd - b.mjd);
+  return records;
 }
 
 async function fetchTimeSeriesRecords(ra: number, dec: number, size: number) {
@@ -338,24 +270,25 @@ async function fetchTimeSeriesRecords(ra: number, dec: number, size: number) {
       ? "qual_frame>0 and mjd_obs between 55197 and 55700"
       : "qual_frame>0 and mjd_obs between 56600 and 60700");
     searchUrl.searchParams.set("columns", "scan_id,frame_num,band,mjd_obs,qual_frame");
-    searchUrl.searchParams.set("FORMAT", "metadata");
-    searchUrl.searchParams.set("RESPONSEFORMAT", "JSON");
+    // Omit FORMAT: IBE defaults to matching rows; FORMAT=METADATA returns only
+    // the schema. The response encoding is `ct`, not SIA's RESPONSEFORMAT.
+    searchUrl.searchParams.set("ct", "CSV");
     const response = await nativeHttpsGet(searchUrl, {
       allowedHosts: [IRSA_HOST],
-      timeoutMs: 20_000,
+      timeoutMs: 30_000,
       maxBytes: 32 * 1024 * 1024,
-      headers: { Accept: "application/json" },
+      headers: { Accept: "text/csv" },
     });
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw new Error(`IRSA ${dataSet} image search failed with status ${response.statusCode}.`);
     }
-    const rawJson = response.body.toString("utf8");
-    if (rawJson.trimStart().startsWith("<")) {
-      const detail = rawJson.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 220);
+    const rawCsv = response.body.toString("utf8");
+    if (rawCsv.trimStart().startsWith("<")) {
+      const detail = rawCsv.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 220);
       throw new Error(`IRSA ${dataSet} image search returned XML: ${detail || "empty error response"}`);
     }
-    const rows = rowsFromIbeJson(rawJson);
-    return { rows, rawJson };
+    const rows = rowsFromIbeCsv(rawCsv);
+    return { rows, rawCsv };
   };
 
   const [neowiserResult, allskyResult] = await Promise.allSettled([
@@ -374,99 +307,9 @@ async function fetchTimeSeriesRecords(ra: number, dec: number, size: number) {
   ];
   return {
     records: finalizeExposureRecords(records),
-    rawMetadataJson: [neowiser?.rawJson ?? null, allsky?.rawJson ?? null],
+    rawMetadataJson: [neowiser?.rawCsv ?? null, allsky?.rawCsv ?? null],
     errors,
   };
-}
-
-async function downloadAndCacheExposure(record: ExposureRecord) {
-  const key = fitsCacheKey(record.upstreamUrl);
-  let bytes: Uint8Array | null = await readFitsCache(key);
-  if (!bytes) {
-    const response = await nativeHttpsGet(record.upstreamUrl, {
-      allowedHosts: [IRSA_HOST],
-      timeoutMs: 12_000,
-      maxBytes: MAX_FITS_BYTES,
-      headers: { Accept: "application/fits, application/octet-stream", "User-Agent": "SpaceApps-AstroViewer-Hackathon/1.0 (Dev)" },
-    });
-    if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw new Error(`IRSA FITS download failed with status ${response.statusCode}.`);
-    }
-    const contentLength = Number(response.headers["content-length"]);
-    if ((Number.isFinite(contentLength) && contentLength > MAX_FITS_BYTES) || response.body.byteLength > MAX_FITS_BYTES) {
-      throw new Error("IRSA FITS cutout exceeds the 20 MB cache limit.");
-    }
-    await writeFitsCache(key, response.body);
-    bytes = response.body;
-  }
-  const dimensions = fitsImageDimensions(bytes);
-  if (!dimensions) throw new Error("FITS image dimensions are missing or invalid.");
-  return {
-    image: { url: `/api/fits?key=${key}`, band: record.band, mjd: record.mjd, source: "single-exposure" as const },
-    dimensions,
-  };
-}
-
-async function synthesizeCachedAllwiseEpochs(ra: number, dec: number, size: number): Promise<ImageRecord[]> {
-  const stageOneKey = irsaQueryCacheKey(JSON.stringify({
-    version: 6,
-    mode: "wise",
-    collection: "wise_allwise",
-    ra,
-    dec,
-    size,
-  }));
-  const stageOne = await readIrsaJsonCache<{ wiseImages?: ImageRecord[] }>(stageOneKey);
-  const base = stageOne?.wiseImages?.find((image) => image.band === "wise-w1") ?? stageOne?.wiseImages?.[0];
-  if (!base) return [];
-
-  let upstreamUrl: URL;
-  try {
-    const imageUrl = new URL(base.url, "https://stella.local");
-    const rawUpstreamUrl = imageUrl.searchParams.get("url");
-    if (!rawUpstreamUrl) return [];
-    upstreamUrl = new URL(rawUpstreamUrl);
-    if (upstreamUrl.protocol !== "https:" || upstreamUrl.hostname !== IRSA_HOST || !upstreamUrl.pathname.startsWith("/ibe/data/")) return [];
-    upstreamUrl.searchParams.set("gzip", "false");
-  } catch {
-    return [];
-  }
-
-  const key = fitsCacheKey(upstreamUrl.toString());
-  let bytes: Uint8Array | null = await readFitsCache(key);
-  if (!bytes) {
-    const response = await nativeHttpsGet(upstreamUrl, {
-      allowedHosts: [IRSA_HOST],
-      timeoutMs: 12_000,
-      maxBytes: MAX_FITS_BYTES,
-      headers: { Accept: "application/fits, application/octet-stream" },
-    });
-    if (response.statusCode < 200 || response.statusCode >= 300) return [];
-    bytes = response.body;
-    await writeFitsCache(key, bytes);
-  }
-  if (!bytes) return [];
-  if (!fitsImageDimensions(bytes)) return [];
-
-  const imageUrl = `/api/fits?key=${key}`;
-  const epochCount = 24;
-  return Array.from({ length: epochCount }, (_, index) => {
-    const year = 2010 + (14 * index) / (epochCount - 1);
-    const wholeYear = Math.floor(year);
-    const epochMs = Date.UTC(wholeYear, 0, 1) + (year - wholeYear) * 365.2425 * 86_400_000;
-    const mjd = epochMs / 86_400_000 + 40_587;
-    return {
-      url: imageUrl,
-      band: base.band,
-      mjd,
-      source: "synthetic-timeseries" as const,
-      // The fallback reuses the same AllWISE cutout; moving the whole cutout
-      // would falsely make the background drift between modeled timestamps.
-      syntheticShiftX: 0,
-      syntheticShiftY: 0,
-      syntheticNoiseSeed: index + 1,
-    };
-  });
 }
 
 async function buildTimeSeriesPayload(ra: number, dec: number, size: number): Promise<TimeSeriesPayload> {
@@ -477,57 +320,35 @@ async function buildTimeSeriesPayload(ra: number, dec: number, size: number): Pr
   await writeFile(metadataPath, JSON.stringify({ responses: searchResult.rawMetadataJson, errors: searchResult.errors }));
 
   if (searchResult.records.length === 0) {
-    const syntheticImages = await synthesizeCachedAllwiseEpochs(ra, dec, size);
     return {
       status: 200,
-      images: syntheticImages,
-      total: syntheticImages.length,
+      images: [],
+      total: 0,
       failed: 0,
       failureSummary: searchResult.errors,
-      source: "synthetic time-series model derived from AllWISE; not observed epochs",
-      synthetic: true,
-      ...(!syntheticImages.length ? { error: "IRSA returned no single-exposure frames and no cached AllWISE FITS image was available for the illustrative timeline." } : {}),
+      source: "no single-exposure observations",
+      error: `No real single-exposure frames were returned. The visible AllWISE image is a static coadd, not a time series.${searchResult.errors.length ? ` IRSA search: ${searchResult.errors.join("; ")}` : ""}`,
     };
   }
 
   const records = searchResult.records;
-  let failed = 0;
-  const failureKinds = new Map<string, number>();
-  const accepted: Awaited<ReturnType<typeof downloadAndCacheExposure>>[] = [];
-  let expectedDimensions: FitsDimensions | null = null;
-  for (let offset = 0; offset < records.length; offset += TIME_SERIES_DOWNLOAD_CONCURRENCY) {
-    const results = await Promise.all(records.slice(offset, offset + TIME_SERIES_DOWNLOAD_CONCURRENCY).map(async (record) => {
-      try { return await downloadAndCacheExposure(record); }
-      catch (error) {
-        failed++;
-        const message = error instanceof Error ? error.message : "unknown error";
-        const status = message.match(/status (\d+)/i)?.[1];
-        const kind = status ? `HTTP ${status}` : /timed out/i.test(message) ? "upstream timeout" : /20 MB/i.test(message) ? "cutout too large" : "download error";
-        failureKinds.set(kind, (failureKinds.get(kind) ?? 0) + 1);
-        return null;
-      }
-    }));
-    const batch = results.filter((result): result is NonNullable<typeof result> => result !== null);
-    if (!expectedDimensions && batch.length) {
-      expectedDimensions = {
-        width: medianDimension(batch.map(({ dimensions }) => dimensions), "width"),
-        height: medianDimension(batch.map(({ dimensions }) => dimensions), "height"),
-      };
-    }
-    for (const result of batch) {
-      if (expectedDimensions && result.dimensions.width >= expectedDimensions.width * 0.65 && result.dimensions.height >= expectedDimensions.height * 0.65) accepted.push(result);
-      else {
-        failed++;
-        failureKinds.set("edge-clipped dimensions", (failureKinds.get("edge-clipped dimensions") ?? 0) + 1);
-      }
-    }
-  }
   return {
     status: 200,
-    images: accepted.map(({ image }) => image).sort((a, b) => (a.mjd ?? Infinity) - (b.mjd ?? Infinity) || a.band.localeCompare(b.band)),
+    images: records.map((record) => {
+      const id = fitsCacheKey(record.upstreamUrl);
+      return {
+        id,
+        frameId: id,
+        url: `/api/fits?url=${encodeURIComponent(record.upstreamUrl)}`,
+        band: record.band,
+        mjd: record.mjd,
+        date: new Date((record.mjd - 40_587) * 86_400_000).toISOString(),
+        source: "single-exposure" as const,
+      };
+    }).sort((a, b) => (a.mjd ?? Infinity) - (b.mjd ?? Infinity) || a.band.localeCompare(b.band)),
     total: records.length,
-    failed,
-    failureSummary: [...searchResult.errors, ...[...failureKinds].map(([kind, count]) => `${kind}: ${count}`)],
+    failed: 0,
+    failureSummary: searchResult.errors,
     source: "IRSA WISE/NEOWISE single-exposure image search (OVERLAPS)",
   };
 }

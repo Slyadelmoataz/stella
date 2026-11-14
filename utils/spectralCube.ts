@@ -3,6 +3,75 @@
  * data[band * width * height + y * width + x]. Wavelengths are in micrometers.
  */
 export type SpectrumPoint = { wavelength: number; flux: number };
+export type NoiseReductionMode = "off" | "standard" | "aggressive";
+
+export type SkyStatistics = { median: number; sigma: number };
+
+function medianOf(values: number[]) {
+  if (!values.length) return 0;
+  values.sort((a, b) => a - b);
+  const middle = Math.floor(values.length / 2);
+  return values.length % 2 ? values[middle] : (values[middle - 1] + values[middle]) / 2;
+}
+
+/** Robust background estimate using three rounds of 3-sigma clipping. */
+export function sigmaClippedSky(values: ArrayLike<number>, iterations = 3): SkyStatistics {
+  let sample = Array.from(values).filter(Number.isFinite);
+  let center = medianOf([...sample]);
+  let sigma = 0;
+  for (let iteration = 0; iteration < iterations && sample.length; iteration++) {
+    center = medianOf([...sample]);
+    sigma = 1.4826 * medianOf(sample.map((value) => Math.abs(value - center)));
+    if (!(sigma > 0)) break;
+    const clipped = sample.filter((value) => Math.abs(value - center) <= 3 * sigma);
+    if (!clipped.length || clipped.length === sample.length) break;
+    sample = clipped;
+  }
+  center = medianOf([...sample]);
+  sigma = 1.4826 * medianOf(sample.map((value) => Math.abs(value - center)));
+  return { median: center, sigma: Number.isFinite(sigma) ? sigma : 0 };
+}
+
+/** Replace isolated >6-sigma spikes with the median of their eight neighbors. */
+export function despeckleOutliers(values: Float32Array, width: number, height: number, sigma: number): Float32Array {
+  if (!(sigma > 0) || width < 3 || height < 3) return values;
+  const result = values.slice();
+  const neighbors: number[] = [];
+  for (let y = 1; y < height - 1; y++) for (let x = 1; x < width - 1; x++) {
+    const index = y * width + x;
+    const value = values[index];
+    if (!Number.isFinite(value)) continue;
+    neighbors.length = 0;
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      if (dx === 0 && dy === 0) continue;
+      const neighbor = values[(y + dy) * width + x + dx];
+      if (Number.isFinite(neighbor)) neighbors.push(neighbor);
+    }
+    if (neighbors.length < 5) continue;
+    const localMedian = medianOf([...neighbors]);
+    if (value > localMedian + 6 * sigma) result[index] = localMedian;
+  }
+  return result;
+}
+
+/** Softly roll the sky floor to zero while retaining the signal above it. */
+export function rollOffSky(value: number, sky: SkyStatistics, mode: NoiseReductionMode) {
+  if (mode === "off" || !(sky.sigma > 0)) return Math.max(0, value - sky.median);
+  const startSigma = mode === "aggressive" ? 3.5 : 2.5;
+  const endSigma = mode === "aggressive" ? 6 : 4.5;
+  const start = sky.median + startSigma * sky.sigma;
+  const end = sky.median + endSigma * sky.sigma;
+  const t = Math.max(0, Math.min(1, (value - start) / Math.max(end - start, Number.EPSILON)));
+  const smooth = t * t * (3 - 2 * t);
+  return Math.max(0, value - start) * smooth;
+}
+
+/** Prepare one image plane for a noise-reduced display, leaving Off untouched. */
+export function prepareNoiseReducedPlane(values: Float32Array, width: number, height: number, mode: NoiseReductionMode) {
+  if (mode === "off") return { values, sky: { median: 0, sigma: 0 } };
+  const sky = sigmaClippedSky(values);
+  return { values: despeckleOutliers(values, width, height, sky.sigma), sky };
+}
 
 export class SpectralCube {
   readonly width: number;
@@ -48,8 +117,8 @@ export class SpectralCube {
   }
 
   /** Create a sky-subtracted, JWST-inspired false-color composite. */
-  getRGBComposite(rArray: number, gArray: number, bArray: number): Uint8ClampedArray {
-    const channels = [rArray, gArray, bArray].map((index) => this.getCoaddedArrayImage(index));
+  getRGBComposite(rArray: number, gArray: number, bArray: number, alphaArray?: number, noiseReduction: NoiseReductionMode = "off"): Uint8ClampedArray {
+    const channels = [rArray, gArray, bArray, ...(alphaArray === undefined ? [] : [alphaArray])].map((index) => this.getCoaddedArrayImage(index));
     const median = (sorted: number[]) => {
       const middle = Math.floor(sorted.length / 2);
       return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
@@ -76,7 +145,9 @@ export class SpectralCube {
         const value = values[pixel];
         corrected[pixel] = Number.isFinite(value) ? value - rowMedians[y] + rowCenter : NaN;
       }
-      return corrected;
+      return noiseReduction === "off"
+        ? corrected
+        : prepareNoiseReducedPlane(corrected, this.width, this.height, noiseReduction).values;
     });
     const footprintFeathers = rowCorrected.map((values) => {
       const distances = new Uint8Array(planeSize);
@@ -124,12 +195,17 @@ export class SpectralCube {
     const stretches = rowCorrected.map((values) => {
       const sorted = [...values].filter(Number.isFinite).sort((a, b) => a - b);
       if (!sorted.length) return { background: 0, white: 0 };
+      if (noiseReduction !== "off") {
+        const sky = sigmaClippedSky(values);
+        const rolled = sorted.map((value) => rollOffSky(value, sky, noiseReduction)).filter((value) => value > 0).sort((a, b) => a - b);
+        return { background: sky.median, white: percentile(rolled, 0.996), sky, rolled: true };
+      }
       const center = median(sorted);
       const deviations = sorted.map((value) => Math.abs(value - center)).sort((a, b) => a - b);
-      const background = center + 2.2 * median(deviations);
+      const background = center + 2.5 * median(deviations);
       const aboveBackground = sorted.map((value) => Math.max(0, value - background)).filter((value) => value > 0);
       aboveBackground.sort((a, b) => a - b);
-      return { background, white: percentile(aboveBackground, 0.996) };
+      return { background, white: percentile(aboveBackground, 0.996), sky: undefined, rolled: false };
     });
     const palette: Record<number, [number, number, number]> = {
       0: [0.16, 0.5, 1],
@@ -148,9 +224,12 @@ export class SpectralCube {
     for (let pixel = 0; pixel < planeSize; pixel++) {
       const normalized = [0, 1, 2].map((channel) => {
         const value = rowCorrected[channel][pixel];
-        const { background, white } = stretches[channel];
+        const { background, white, sky, rolled } = stretches[channel];
         const feather = Math.min(1, footprintFeathers[channel][pixel] / 8);
-        return Number.isFinite(value) && white > 0 ? Math.max(0, value - background) / white * feather : 0;
+        const signal = Number.isFinite(value) && rolled && sky
+          ? rollOffSky(value, sky, noiseReduction)
+          : Math.max(0, value - background);
+        return Number.isFinite(value) && white > 0 ? signal / white * feather : 0;
       });
       const linear = [0, 1, 2].map((outputChannel) =>
         normalized.reduce((sum, value, inputChannel) => sum + value * channelColors[inputChannel][outputChannel], 0),
@@ -164,9 +243,40 @@ export class SpectralCube {
         const saturated = luminance + (stretched[channel] - luminance) * 1.35;
         rgba[pixel * 4 + channel] = Math.round(Math.max(0, Math.min(1, saturated)) * 255);
       }
-      rgba[pixel * 4 + 3] = 255;
+      if (alphaArray === undefined) rgba[pixel * 4 + 3] = 255;
+      else {
+        const alphaValue = rowCorrected[3][pixel];
+        const { background, white, sky, rolled } = stretches[3];
+        const feather = Math.min(1, footprintFeathers[3][pixel] / 8);
+        const alphaSignal = Number.isFinite(alphaValue) && rolled && sky
+          ? rollOffSky(alphaValue, sky, noiseReduction)
+          : Math.max(0, alphaValue - background);
+        const alpha = Number.isFinite(alphaValue) && white > 0 ? Math.max(0, Math.min(1, alphaSignal / white * feather)) : 0;
+        rgba[pixel * 4 + 3] = Math.round(alpha * 255);
+      }
     }
-    return rgba;
+    // A light separable 3×3 Gaussian removes diagonal aliasing from detector
+    // resampling without noticeably enlarging point sources.
+    const smoothed = new Uint8ClampedArray(rgba.length);
+    const kernel = [1, 2, 1];
+    for (let y = 0; y < this.height; y++) for (let x = 0; x < this.width; x++) {
+      const destination = (y * this.width + x) * 4;
+      for (let channel = 0; channel < 3; channel++) {
+        let total = 0;
+        let weight = 0;
+        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < 0 || nx >= this.width || ny < 0 || ny >= this.height) continue;
+          const sampleWeight = kernel[dx + 1] * kernel[dy + 1];
+          total += rgba[(ny * this.width + nx) * 4 + channel] * sampleWeight;
+          weight += sampleWeight;
+        }
+        smoothed[destination + channel] = Math.round(total / weight);
+      }
+      smoothed[destination + 3] = 255;
+    }
+    return smoothed;
   }
 
   extractSpectrum(centerX: number, centerY: number, apertureRadius = 3, skyInner = 5, skyOuter = 8): SpectrumPoint[] {

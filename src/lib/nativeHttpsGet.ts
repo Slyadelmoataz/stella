@@ -1,6 +1,10 @@
 import https from "node:https";
 import type { IncomingHttpHeaders } from "node:http";
 
+// Reuse TLS connections for IRSA's many small FITS cutouts. Four sockets keep
+// throughput predictable without opening a large burst against the archive.
+const irsaAgent = new https.Agent({ keepAlive: true, maxSockets: 4, maxFreeSockets: 4, scheduling: "lifo" });
+
 export type NativeHttpsResponse = {
   statusCode: number;
   headers: IncomingHttpHeaders;
@@ -31,6 +35,7 @@ export function nativeHttpsGet(input: string | URL, options: HttpsGetOptions): P
     }
 
     const request = https.get(requestUrl, {
+      agent: irsaAgent,
       family: 4,
       timeout: timeoutMs,
       headers: options.headers,

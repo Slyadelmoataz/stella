@@ -3,13 +3,17 @@
 import { useEffect, useRef, useState } from "react";
 import Image from "next/image";
 import {
-  LocateFixed,
+  Check,
+  Copy,
   Minus,
   Plus,
   RotateCcw,
   Search,
 } from "lucide-react";
 import ImageBlinker from "@/components/ImageBlinker";
+import type { TimelineLinkState } from "@/components/ImageBlinker";
+import { BUILT_IN_IMAGE_SOURCES, loadImageSources, saveImageSources, type ImageSource, type ImageSourceProtocol } from "../../config/imageSources";
+import type { NoiseReductionMode } from "../../utils/spectralCube";
 
 type SimbadObject = {
   name: string;
@@ -26,9 +30,16 @@ type ImageRecord = {
   band: string;
   mjd: number | null;
   source?: "allwise-atlas" | "single-exposure" | "synthetic-timeseries";
+  sourceId?: string;
+  sourceName?: string;
+  agency?: string;
   syntheticShiftX?: number;
   syntheticShiftY?: number;
   syntheticNoiseSeed?: number;
+  syntheticMotionFraction?: number;
+  syntheticMotionArcsecPerYear?: number;
+  syntheticObjectOffsetRaArcsec?: number;
+  syntheticObjectOffsetDecArcsec?: number;
 };
 
 const TARGET_PRESETS = [
@@ -43,6 +54,8 @@ const FIELD_OPTIONS = [
   { value: 0.25, label: "0.25° Nebula Wide" },
   { value: 0.5, label: "0.5° Panoramic" },
 ];
+
+const MAX_NEARBY_OBJECTS = 40;
 
 
 function coordinateToDegrees(value: string, isRa: boolean): number | null {
@@ -64,14 +77,15 @@ function coordinateToDegrees(value: string, isRa: boolean): number | null {
 }
 
 export default function Home() {
-  const [ra, setRa] = useState("08h55m08.699s");
-  const [dec, setDec] = useState("-7d14m39.74s");
+  const [ra, setRa] = useState("08h55m10.74s");
+  const [dec, setDec] = useState("-7d14m42.5s");
   const [targetName, setTargetName] = useState(TARGET_PRESETS[0].name);
   const [targetSubtitle, setTargetSubtitle] = useState(TARGET_PRESETS[0].subtitle);
   const [fieldSizeDeg, setFieldSizeDeg] = useState(0.05);
   const [zoom, setZoom] = useState(1.0);
   const [panOffset, setPanOffset] = useState({ x: 0, y: 0 });
   const [playbackSpeed, setPlaybackSpeed] = useState(500);
+  const [noiseReduction, setNoiseReduction] = useState<NoiseReductionMode>("standard");
   const [images, setImages] = useState<ImageRecord[]>([]);
   const [simbadObjects, setSimbadObjects] = useState<SimbadObject[]>([]);
   const [selectedSpectrumObject, setSelectedSpectrumObject] = useState<SimbadObject | null>(null);
@@ -80,9 +94,107 @@ export default function Home() {
   const [irsaFailed, setIrsaFailed] = useState(false);
   const [requestError, setRequestError] = useState("");
   const [refreshKey, setRefreshKey] = useState(0);
+  const [dataSources, setDataSources] = useState<ImageSource[]>(() => BUILT_IN_IMAGE_SOURCES.map((source) => ({ ...source, bands: [...source.bands] })));
+  const [sourceRegistryReady, setSourceRegistryReady] = useState(false);
+  const [sourceImages, setSourceImages] = useState<ImageRecord[]>([]);
+  const [sourceErrors, setSourceErrors] = useState<string[]>([]);
+  const [showAddSource, setShowAddSource] = useState(false);
+  const [newSourceName, setNewSourceName] = useState("");
+  const [newSourceProtocol, setNewSourceProtocol] = useState<ImageSourceProtocol>("hips2fits");
+  const [newSourceEndpoint, setNewSourceEndpoint] = useState("");
+  const [newSourceWavelength, setNewSourceWavelength] = useState("");
+  const [initialTimeline, setInitialTimeline] = useState<TimelineLinkState | null>(null);
+  const [timelineShare, setTimelineShare] = useState<TimelineLinkState>({ band: "wise-w1", view: "time" });
+  const [urlInitialized, setUrlInitialized] = useState(false);
+  const [shareCopied, setShareCopied] = useState(false);
   const timeSeriesControllerRef = useRef<AbortController | null>(null);
   const viewerRa = coordinateToDegrees(ra, true) ?? undefined;
   const viewerDec = coordinateToDegrees(dec, false) ?? undefined;
+  const wiseSourceEnabled = dataSources.find((source) => source.id === "wise-neowise")?.enabled ?? true;
+  const spherexSourceEnabled = dataSources.find((source) => source.id === "spherex-archive")?.enabled ?? true;
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const linkedRa = params.get("ra");
+    const linkedDec = params.get("dec");
+    const linkedSize = Number(params.get("size"));
+    const linkedZoom = Number(params.get("zoom"));
+    const linkedSpeed = Number(params.get("speed"));
+    const linkedTarget = params.get("target");
+    const linkedDescription = params.get("description");
+    const preset = TARGET_PRESETS.find((item) => item.name === linkedTarget);
+
+    if (linkedRa && coordinateToDegrees(linkedRa, true) !== null) setRa(linkedRa);
+    if (linkedDec && coordinateToDegrees(linkedDec, false) !== null) setDec(linkedDec);
+    if (FIELD_OPTIONS.some((option) => option.value === linkedSize)) setFieldSizeDeg(linkedSize);
+    if (Number.isFinite(linkedZoom) && linkedZoom >= 1 && linkedZoom <= 10) setZoom(linkedZoom);
+    if (Number.isFinite(linkedSpeed) && linkedSpeed >= 100 && linkedSpeed <= 1000) setPlaybackSpeed(linkedSpeed);
+    if (linkedTarget) {
+      setTargetName(linkedTarget);
+      setTargetSubtitle(linkedDescription || preset?.subtitle || "Observation opened from a shared link");
+    }
+
+    const requestedBand = params.get("band") ?? "wise-w1";
+    const validBands = ["wise-w1", "wise-w2", "wise-w3", "wise-w4", "0.75-1.1", "1.1-1.6", "1.6-2.4", "2.4-3.8", "3.8-4.4", "4.4-5.0"];
+    const requestedView = params.get("view");
+    const timeline: TimelineLinkState = {
+      band: validBands.includes(requestedBand) ? requestedBand : "wise-w1",
+      view: requestedView === "spherex" || requestedView === "multimission" ? requestedView : "time",
+      ...(params.get("from") ? { from: params.get("from")! } : {}),
+      ...(params.get("to") ? { to: params.get("to")! } : {}),
+    };
+    setInitialTimeline(timeline);
+    setTimelineShare(timeline);
+    setUrlInitialized(true);
+  }, []);
+
+  useEffect(() => {
+    if (!urlInitialized || viewerRa === undefined || viewerDec === undefined) return;
+    const url = new URL(window.location.href);
+    url.searchParams.set("ra", viewerRa.toFixed(6));
+    url.searchParams.set("dec", viewerDec.toFixed(6));
+    url.searchParams.set("size", String(fieldSizeDeg));
+    url.searchParams.set("target", targetName);
+    url.searchParams.set("description", targetSubtitle);
+    url.searchParams.set("zoom", zoom.toFixed(1));
+    url.searchParams.set("speed", String(playbackSpeed));
+    url.searchParams.set("source", "wise-neowise");
+    url.searchParams.set("band", timelineShare.band);
+    url.searchParams.set("view", timelineShare.view);
+    if (timelineShare.from) url.searchParams.set("from", timelineShare.from);
+    else url.searchParams.delete("from");
+    if (timelineShare.to) url.searchParams.set("to", timelineShare.to);
+    else url.searchParams.delete("to");
+    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+  }, [fieldSizeDeg, playbackSpeed, targetName, targetSubtitle, timelineShare, urlInitialized, viewerDec, viewerRa, zoom]);
+
+  useEffect(() => {
+    // A previously installed production PWA worker can serve stale HTML while
+    // Next dev has different hashed CSS assets, leaving the page unstyled.
+    if (process.env.NODE_ENV !== "development" || !("serviceWorker" in navigator)) return;
+    let active = true;
+    void navigator.serviceWorker.getRegistrations().then(async (registrations) => {
+      if (!active || !registrations.length) return;
+      const wasControlled = Boolean(navigator.serviceWorker.controller);
+      await Promise.all(registrations.map((registration) => registration.unregister()));
+      if (active && wasControlled) window.location.reload();
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    setDataSources(loadImageSources());
+    setSourceRegistryReady(true);
+  }, []);
+  useEffect(() => {
+    if (sourceRegistryReady) saveImageSources(dataSources);
+  }, [dataSources, sourceRegistryReady]);
+
+  useEffect(() => {
+    // Any new target/FOV needs a fresh centered viewport, including manual
+    // coordinate edits and changes made from the quick target buttons.
+    setPanOffset({ x: 0, y: 0 });
+  }, [dec, fieldSizeDeg, ra]);
 
   useEffect(() => {
     const decimalRa = coordinateToDegrees(ra, true);
@@ -108,9 +220,15 @@ export default function Home() {
       setRequestError("");
       setIrsaFailed(false);
       const imageQuery = new URLSearchParams({ ra: String(decimalRa), dec: String(decimalDec), size: String(fieldSizeDeg) });
-      const objectQuery = new URLSearchParams({ ra: String(decimalRa), dec: String(decimalDec), radius: String(Math.max(0.1, fieldSizeDeg)) });
+      const objectQuery = new URLSearchParams({ ra: String(decimalRa), dec: String(decimalDec), radius: String(Math.max(0.15, fieldSizeDeg)) });
+      setTimeSeriesStatus(wiseSourceEnabled ? "Searching NASA/IRSA for WISE single-exposure frames…" : "WISE / NEOWISE is disabled in Data Sources.");
 
       const imageTask = (async () => {
+        if (!wiseSourceEnabled) {
+          setImages([]);
+          setTimeSeriesStatus("WISE / NEOWISE is disabled in Data Sources.");
+          return;
+        }
         try {
           const response = await fetch(`/api/images?${imageQuery}`, { signal: controller.signal });
           const body = await response.json() as { wiseImages?: ImageRecord[]; error?: string };
@@ -145,7 +263,7 @@ export default function Home() {
           const response = await fetch(`/api/objects?${objectQuery}`, { signal: controller.signal });
           if (!response.ok) throw new Error("Could not load nearby objects.");
           const objects = await response.json() as SimbadObject[];
-          if (!controller.signal.aborted) setSimbadObjects(Array.isArray(objects) ? objects : []);
+          if (!controller.signal.aborted) setSimbadObjects(Array.isArray(objects) ? objects.slice(0, MAX_NEARBY_OBJECTS) : []);
         } catch {
           if (!controller.signal.aborted) {
             setSimbadObjects([]);
@@ -165,7 +283,41 @@ export default function Home() {
       timeSeriesController?.abort();
       if (timeSeriesControllerRef.current === timeSeriesController) timeSeriesControllerRef.current = null;
     };
-  }, [ra, dec, refreshKey, fieldSizeDeg]);
+  }, [ra, dec, refreshKey, fieldSizeDeg, wiseSourceEnabled]);
+
+  useEffect(() => {
+    if (!sourceRegistryReady) return;
+    const decimalRa = coordinateToDegrees(ra, true);
+    const decimalDec = coordinateToDegrees(dec, false);
+    if (decimalRa === null || decimalDec === null) return;
+    const additionalSources = dataSources.filter((source) => source.enabled && !["wise-neowise", "spherex-archive"].includes(source.id));
+    if (!additionalSources.length) {
+      setSourceImages([]);
+      setSourceErrors([]);
+      return;
+    }
+    const controller = new AbortController();
+    let active = true;
+    void fetch("/api/source-images", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ra: decimalRa, dec: decimalDec, size: fieldSizeDeg, sources: additionalSources }),
+      signal: controller.signal,
+    }).then(async (response) => {
+      const payload = await response.json() as { images?: ImageRecord[]; errors?: string[]; error?: string };
+      if (!response.ok) throw new Error(payload.error || `Additional survey request failed (${response.status}).`);
+      if (active) {
+        setSourceImages(Array.isArray(payload.images) ? payload.images : []);
+        setSourceErrors(Array.isArray(payload.errors) ? payload.errors : []);
+      }
+    }).catch((error) => {
+      if (active && !controller.signal.aborted) {
+        setSourceImages([]);
+        setSourceErrors([error instanceof Error ? error.message : "Additional survey data unavailable."]);
+      }
+    });
+    return () => { active = false; controller.abort(); };
+  }, [dataSources, dec, fieldSizeDeg, ra, sourceRegistryReady]);
 
   async function loadTimeSeries(decimalRa: number, decimalDec: number, signal: AbortSignal) {
     const query = new URLSearchParams({ mode: "timeseries", ra: String(decimalRa), dec: String(decimalDec), size: String(fieldSizeDeg) });
@@ -211,6 +363,84 @@ export default function Home() {
     }
   }
 
+  function toggleSource(sourceId: string, enabled: boolean) {
+    setDataSources((current) => current.map((source) => source.id === sourceId ? { ...source, enabled } : source));
+  }
+
+  function saveCustomSource() {
+    const name = newSourceName.trim();
+    const endpointUrl = newSourceEndpoint.trim();
+    const wavelengthRange = newSourceWavelength.trim();
+    if (!name || !endpointUrl || !wavelengthRange) return;
+    const id = `${name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "custom-source"}-${Date.now().toString(36)}`;
+    const source: ImageSource = {
+      id,
+      name,
+      agency: "Custom",
+      wavelengthRange,
+      protocol: newSourceProtocol,
+      endpointUrl,
+      bands: ["image"],
+      enabled: true,
+      supportsTimeSeries: false,
+    };
+    setDataSources((current) => [...current, source]);
+    setShowAddSource(false);
+    setNewSourceName("");
+    setNewSourceEndpoint("");
+    setNewSourceWavelength("");
+  }
+
+  function fillSourcePreset(preset: "panstarrs" | "glimpse" | "jwst") {
+    if (preset === "panstarrs") {
+      setNewSourceName("Pan-STARRS DR1");
+      setNewSourceProtocol("hips2fits");
+      setNewSourceEndpoint("CDS/P/PanSTARRS/DR1/color");
+      setNewSourceWavelength("0.4–1.0 µm");
+    } else if (preset === "glimpse") {
+      setNewSourceName("Spitzer GLIMPSE");
+      setNewSourceProtocol("sia-v2");
+      setNewSourceEndpoint("https://irsa.ipac.caltech.edu/SIA");
+      setNewSourceWavelength("3.6–8.0 µm");
+    } else {
+      setNewSourceName("JWST MAST FITS");
+      setNewSourceProtocol("direct-fits");
+      setNewSourceEndpoint("https://mast.stsci.edu/api/v0.1/Download/file?uri={uri}");
+      setNewSourceWavelength("0.6–28 µm");
+    }
+  }
+
+  function observationMetadataHref() {
+    const params = new URLSearchParams({
+      ra: String(viewerRa ?? ""),
+      dec: String(viewerDec ?? ""),
+      size: String(fieldSizeDeg),
+      target: targetName,
+      description: targetSubtitle,
+      band: timelineShare.band,
+      view: timelineShare.view,
+      zoom: zoom.toFixed(1),
+      speed: String(playbackSpeed),
+    });
+    if (timelineShare.from) params.set("from", timelineShare.from);
+    if (timelineShare.to) params.set("to", timelineShare.to);
+    return `/api/observations?${params.toString()}`;
+  }
+
+  async function copyObservationLink() {
+    const apiHref = observationMetadataHref();
+    const url = new URL(window.location.href);
+    url.search = new URLSearchParams(apiHref.split("?")[1] ?? "").toString();
+    window.history.replaceState(window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+    try {
+      await navigator.clipboard.writeText(url.toString());
+      setShareCopied(true);
+      window.setTimeout(() => setShareCopied(false), 1800);
+    } catch {
+      setShareCopied(false);
+    }
+  }
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -224,31 +454,32 @@ export default function Home() {
               <h1>{targetName}</h1>
               <p className="subheading">{targetSubtitle}</p>
             </div>
-            <button className="subtle-button"><span>Visible light</span><span className="chevron">⌄</span></button>
           </div>
 
           <ImageBlinker
             images={images}
+            sourceImages={sourceImages}
             playbackSpeed={playbackSpeed}
+            noiseReduction={noiseReduction}
             centerRa={viewerRa}
             centerDec={viewerDec}
             fieldSizeDeg={fieldSizeDeg}
+            spherexEnabled={spherexSourceEnabled}
             zoom={zoom}
             panOffset={panOffset}
             onPanChange={setPanOffset}
             selectedObject={selectedSpectrumObject}
             simbadObjects={simbadObjects}
             irsaFailed={irsaFailed}
+            timeSeriesStatus={timeSeriesStatus}
+            initialTimeline={initialTimeline}
+            onTimelineStateChange={setTimelineShare}
             onIrsaFailure={() => setIrsaFailed(true)}
             alt="Astronomical image time-lapse"
           />
-          <div className="request-status" aria-live="polite">
-            {loading ? "Searching IRSA and SIMBAD…" : requestError || `${images.length} image frames · ${simbadObjects.length} nearby objects`}
-            {!loading && timeSeriesStatus ? ` · ${timeSeriesStatus}` : ""}
-          </div>
+          {(loading || requestError) && <div className="request-status" aria-live="polite">{loading ? "Loading observation…" : requestError}</div>}
 
           <div className="viewer-footer">
-            <div className="image-caption">{irsaFailed ? "Offline Gaussian Starfield · Model Only" : "Image preview"}</div>
             <div className="zoom-controls">
               <button aria-label="Reset zoom" onClick={() => { setZoom(1); setPanOffset({ x: 0, y: 0 }); }}><RotateCcw size={14} /></button>
               <span className="controls-divider" />
@@ -261,6 +492,18 @@ export default function Home() {
 
         <aside className="sidebar">
           <div className="sidebar-heading"><h2>Observation</h2></div>
+
+          <section className="control-group data-source-group">
+            <div className="group-heading"><h3>Data Sources</h3><output>{dataSources.filter((source) => source.enabled).length} active</output></div>
+            <div className="data-source-list">
+              {dataSources.map((source) => <label className="data-source-row" key={source.id}>
+                <input type="checkbox" checked={source.enabled} onChange={(event) => toggleSource(source.id, event.target.checked)} />
+                <span className="data-source-copy"><strong>{source.name}</strong><small>{source.agency} · {source.wavelengthRange}{source.supportsTimeSeries ? " · time series" : ""}</small></span>
+              </label>)}
+            </div>
+            <button type="button" className="add-source-button" onClick={() => setShowAddSource(true)}>＋ Add Source</button>
+            {sourceErrors[0] && <p className="source-fetch-error">{sourceErrors[0]}</p>}
+          </section>
 
           <section className="control-group quick-target-group">
             <div className="group-heading"><h3>Quick targets</h3></div>
@@ -279,18 +522,22 @@ export default function Home() {
               ))}
             </div>
             <label htmlFor="field-of-view">Field of View</label>
-            <select id="field-of-view" className="text-input field-of-view-select" value={fieldSizeDeg} onChange={(event) => setFieldSizeDeg(Number(event.target.value))}>
+            <select id="field-of-view" className="text-input field-of-view-select" value={fieldSizeDeg} onChange={(event) => { setFieldSizeDeg(Number(event.target.value)); setPanOffset({ x: 0, y: 0 }); }}>
               {FIELD_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
             </select>
           </section>
 
           <section className="control-group coordinates-group">
-            <div className="group-heading"><h3>Coordinates</h3><button className="small-icon-button" aria-label="Use current location"><LocateFixed size={15} /></button></div>
+            <div className="group-heading"><h3>Coordinates</h3></div>
             <label htmlFor="right-ascension">Right ascension <span>RA</span></label>
             <input id="right-ascension" className="text-input" value={ra} onChange={(event) => { setRa(event.target.value); setTargetName("Custom target"); setTargetSubtitle("User-entered J2000 coordinates"); }} />
             <label htmlFor="declination">Declination <span>DEC</span></label>
             <input id="declination" className="text-input" value={dec} onChange={(event) => { setDec(event.target.value); setTargetName("Custom target"); setTargetSubtitle("User-entered J2000 coordinates"); }} />
             <button className="locate-button" type="button" onClick={() => setRefreshKey((key) => key + 1)}><Search size={14} /> Refresh results</button>
+            <div className="observation-link-tools">
+              <button type="button" className="share-link-button" onClick={() => void copyObservationLink()}>{shareCopied ? <Check size={13} /> : <Copy size={13} />}{shareCopied ? "Copied link" : "Copy observation link"}</button>
+              <a className="metadata-api-link" href={observationMetadataHref()} target="_blank" rel="noreferrer">Open JSON metadata / webhook API</a>
+            </div>
           </section>
 
           <section className="control-group range-group">
@@ -305,13 +552,22 @@ export default function Home() {
             <div className="range-ends"><span>100 ms</span><span>1000 ms</span></div>
           </section>
 
+          <section className="control-group noise-reduction-group">
+            <div className="group-heading"><h3>Noise reduction</h3></div>
+            <select className="noise-reduction-select" aria-label="Noise reduction" value={noiseReduction} onChange={(event) => setNoiseReduction(event.target.value as NoiseReductionMode)}>
+              <option value="off">Off</option>
+              <option value="standard">Standard</option>
+              <option value="aggressive">Aggressive</option>
+            </select>
+          </section>
+
           <section className="control-group nearby-group">
             <div className="group-heading"><h3>Nearby objects</h3><output>{simbadObjects.length}</output></div>
             {simbadObjects.length === 0 ? (
               <p className="nearby-empty">{loading ? "Searching…" : "No catalog objects found in this radius."}</p>
             ) : (
               <ul className="object-list">
-                {simbadObjects.slice(0, 8).map((object, index) => (
+                {simbadObjects.slice(0, MAX_NEARBY_OBJECTS).map((object, index) => (
                   <li key={`${object.name}-${index}`}>
                     <button type="button" className="object-name object-select-button" onClick={() => setSelectedSpectrumObject(object)} aria-label={`Extract spectrum for ${object.name}`} aria-pressed={selectedSpectrumObject?.name === object.name}>{object.name}</button>
                     <span className="object-type">{object.objectType || "Unknown type"}</span>
@@ -321,9 +577,19 @@ export default function Home() {
             )}
           </section>
 
-          <div className="sidebar-note">Coordinates use the J2000 reference epoch.</div>
         </aside>
       </div>
+      {showAddSource && <div className="source-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowAddSource(false); }}>
+        <section className="source-modal" role="dialog" aria-modal="true" aria-labelledby="add-source-title">
+          <header><div><h2 id="add-source-title">Add astronomical source</h2><p>Register a FITS image, HiPS survey, or SIA endpoint.</p></div><button type="button" aria-label="Close" onClick={() => setShowAddSource(false)}>×</button></header>
+          <div className="source-presets"><button type="button" onClick={() => fillSourcePreset("panstarrs")}>Pan-STARRS DR1</button><button type="button" onClick={() => fillSourcePreset("glimpse")}>Spitzer GLIMPSE</button><button type="button" onClick={() => fillSourcePreset("jwst")}>JWST MAST FITS</button></div>
+          <label>Source name<input value={newSourceName} onChange={(event) => setNewSourceName(event.target.value)} placeholder="Survey or instrument name" /></label>
+          <label>Protocol<select value={newSourceProtocol} onChange={(event) => setNewSourceProtocol(event.target.value as ImageSourceProtocol)}><option value="hips2fits">HiPS2FITS Survey ID</option><option value="sia-v2">IRSA SIA v2 endpoint</option><option value="direct-fits">Direct FITS URL</option></select></label>
+          <label>Endpoint / Survey ID<input value={newSourceEndpoint} onChange={(event) => setNewSourceEndpoint(event.target.value)} placeholder="CDS/P/... or https://…" /></label>
+          <label>Wavelength range (µm)<input value={newSourceWavelength} onChange={(event) => setNewSourceWavelength(event.target.value)} placeholder="e.g. 0.4–0.9 µm" /></label>
+          <footer><button type="button" className="image-blinker-toggle" onClick={() => setShowAddSource(false)}>Cancel</button><button type="button" className="locate-button" disabled={!newSourceName.trim() || !newSourceEndpoint.trim() || !newSourceWavelength.trim()} onClick={saveCustomSource}>Save and fetch at current coordinates</button></footer>
+        </section>
+      </div>}
     </main>
   );
 }

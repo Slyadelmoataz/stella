@@ -54,15 +54,35 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    const upstream = await nativeHttpsGet(fitsUrl, {
-      allowedHosts: [IRSA_HOST],
-      timeoutMs: 20_000,
-      maxBytes: MAX_FITS_BYTES,
-      headers: {
-        Accept: "application/fits, application/octet-stream",
-        "User-Agent": "SpaceApps-AstroViewer-Hackathon/1.0 (Dev)",
-      },
-    });
+    let upstream: Awaited<ReturnType<typeof nativeHttpsGet>> | null = null;
+    let lastError: Error | null = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const response = await nativeHttpsGet(fitsUrl, {
+          allowedHosts: [IRSA_HOST],
+          timeoutMs: 20_000,
+          maxBytes: MAX_FITS_BYTES,
+          headers: {
+            Accept: "application/fits, application/octet-stream",
+            "User-Agent": "SpaceApps-AstroViewer-Hackathon/1.0 (Dev)",
+          },
+        });
+        if (response.statusCode >= 200 && response.statusCode < 300) {
+          upstream = response;
+          break;
+        }
+        lastError = new Error(`IRSA could not provide this FITS image (${response.statusCode}).`);
+        const retryable = response.statusCode === 429 || response.statusCode >= 500;
+        if (!retryable || attempt === 2) break;
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error("IRSA FITS request failed.");
+        const retryable = lastError.name === "TimeoutError" || /ECONNRESET|EPIPE|EAI_AGAIN|socket hang up/i.test(lastError.message);
+        if (!retryable || attempt === 2) break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 400 * (attempt + 1)));
+    }
+    if (!upstream && lastError) throw lastError;
+    if (!upstream) throw new Error("IRSA FITS request failed after retries.");
     if (upstream.statusCode < 200 || upstream.statusCode >= 300) {
       return NextResponse.json({ error: `IRSA could not provide this FITS image (${upstream.statusCode}).` }, { status: 502 });
     }

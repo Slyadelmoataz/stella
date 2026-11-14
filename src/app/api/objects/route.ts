@@ -10,7 +10,7 @@ const TAP_ENDPOINTS = [
   "https://simbad.cds.unistra.fr/simbad/sim-tap/sync",
 ];
 
-const MAX_RESULTS = 500;
+const MAX_RESULTS = 40;
 
 type TapResponse = {
   data?: unknown[][];
@@ -38,20 +38,21 @@ export async function GET(request: NextRequest) {
   const params = new URL(request.url).searchParams;
   const ra = numberParam(params.get("ra"));
   const dec = numberParam(params.get("dec"));
-  const radius = numberParam(params.get("radius"));
+  const requestedRadius = numberParam(params.get("radius"));
 
-  if (ra === null || dec === null || radius === null) {
+  if (ra === null || dec === null || requestedRadius === null) {
     return NextResponse.json(
       { error: "Required query parameters: ra, dec, and radius (decimal degrees)." },
       { status: 400 },
     );
   }
-  if (ra < 0 || ra >= 360 || dec < -90 || dec > 90 || radius <= 0 || radius > 180) {
+  if (ra < 0 || ra >= 360 || dec < -90 || dec > 90 || requestedRadius <= 0 || requestedRadius > 180) {
     return NextResponse.json(
       { error: "Coordinates must be RA 0–360°, Dec −90–90°, and radius greater than 0 and at most 180°." },
       { status: 400 },
     );
   }
+  const radius = Math.max(0.15, requestedRadius);
 
   // ADQL's CIRCLE radius is in degrees. Values are validated numbers, not
   // user-provided ADQL fragments.
@@ -60,7 +61,8 @@ FROM basic
 WHERE 1 = CONTAINS(
   POINT('ICRS', ra, dec),
   CIRCLE('ICRS', ${ra}, ${dec}, ${radius})
- )`;
+ )
+ORDER BY DISTANCE(POINT('ICRS', ra, dec), POINT('ICRS', ${ra}, ${dec}))`;
 
   const tapRequests = TAP_ENDPOINTS.map(async (endpoint) => {
     const tapUrl = new URL(endpoint);
