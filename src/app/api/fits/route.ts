@@ -3,6 +3,7 @@ import { fitsCacheKey, readFitsCache, writeFitsCache } from "@/lib/fitsCache";
 import { nativeHttpsGet } from "@/lib/nativeHttpsGet";
 
 export const runtime = "nodejs";
+export const maxDuration = 60;
 
 const IRSA_HOST = "irsa.ipac.caltech.edu";
 const MAX_FITS_BYTES = 20 * 1024 * 1024;

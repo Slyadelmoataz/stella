@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 export const runtime = "nodejs";
+export const maxDuration = 60;
 
 // CDS currently lists these mirrors as alternatives when its Strasbourg
 // services are unavailable. Each URL is a SIMBAD TAP sync endpoint.

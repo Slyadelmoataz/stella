@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { irsaCachePath } from "@/lib/irsaCachePath";
 
 export const runtime = "nodejs";
 
@@ -24,7 +25,7 @@ type CachedTimeline = {
   failureSummary?: string[];
 };
 
-const CACHE_DIR = path.join(process.cwd(), ".cache", "irsa");
+const CACHE_DIR = irsaCachePath();
 const CACHE_VERSION = 12;
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",

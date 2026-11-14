@@ -3,10 +3,12 @@ import { setDefaultResultOrder } from "node:dns";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fitsCacheKey } from "@/lib/fitsCache";
+import { irsaCachePath } from "@/lib/irsaCachePath";
 import { irsaQueryCacheKey, readIrsaJsonCache, writeIrsaJsonCache } from "@/lib/irsaJsonCache";
 import { nativeHttpsGet } from "@/lib/nativeHttpsGet";
 
 export const runtime = "nodejs";
+export const maxDuration = 60;
 
 const SIA_ENDPOINT = "https://irsa.ipac.caltech.edu/SIA";
 const IRSA_HOST = "irsa.ipac.caltech.edu";
@@ -95,7 +97,7 @@ export type SpherexCubeRecord = { url: string; ra: number; dec: number; pixelSca
 const TIME_SERIES_CUTOUT_MARGIN = 1.5;
 const FIRST_EPOCH_MS = Date.UTC(2010, 0, 1);
 const LAST_EPOCH_MS = Date.UTC(2024, 11, 31);
-const TIMESERIES_CACHE_DIR = path.join(process.cwd(), ".cache", "irsa");
+const TIMESERIES_CACHE_DIR = irsaCachePath();
 type TimeSeriesPayload = {
   status: 200;
   cacheVersion?: 12;
@@ -124,11 +126,15 @@ async function readTimeSeriesCache(ra: number, dec: number, size: number): Promi
 
 async function writeTimeSeriesCache(ra: number, dec: number, size: number, data: TimeSeriesPayload) {
   if (data.status !== 200 || data.images.length === 0) return;
-  await mkdir(TIMESERIES_CACHE_DIR, { recursive: true });
-  const destination = timeSeriesCachePath(ra, dec, size);
-  const temporary = `${destination}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(temporary, JSON.stringify({ ...data, cacheVersion: 12 }), { flag: "wx" });
-  await rename(temporary, destination);
+  try {
+    await mkdir(TIMESERIES_CACHE_DIR, { recursive: true });
+    const destination = timeSeriesCachePath(ra, dec, size);
+    const temporary = `${destination}.${process.pid}.${Date.now()}.tmp`;
+    await writeFile(temporary, JSON.stringify({ ...data, cacheVersion: 12 }), { flag: "wx" });
+    await rename(temporary, destination);
+  } catch {
+    // Cache failures must not fail an otherwise successful time-series response.
+  }
 }
 
 function finalizeExposureRecords(records: ExposureRecord[]) {
@@ -315,9 +321,13 @@ async function fetchTimeSeriesRecords(ra: number, dec: number, size: number) {
 async function buildTimeSeriesPayload(ra: number, dec: number, size: number): Promise<TimeSeriesPayload> {
   const searchResult = await fetchTimeSeriesRecords(ra, dec, size);
   // Keep the metadata response durable alongside the completed frame manifest.
-  await mkdir(TIMESERIES_CACHE_DIR, { recursive: true });
-  const metadataPath = path.join(TIMESERIES_CACHE_DIR, `timeseries_${ra.toFixed(4)}_${dec.toFixed(4)}_${size}.metadata.json`);
-  await writeFile(metadataPath, JSON.stringify({ responses: searchResult.rawMetadataJson, errors: searchResult.errors }));
+  try {
+    await mkdir(TIMESERIES_CACHE_DIR, { recursive: true });
+    const metadataPath = timeSeriesCachePath(ra, dec, size).replace(/\.json$/, ".metadata.json");
+    await writeFile(metadataPath, JSON.stringify({ responses: searchResult.rawMetadataJson, errors: searchResult.errors }));
+  } catch {
+    // Metadata is diagnostic only; failure must not block frame delivery.
+  }
 
   if (searchResult.records.length === 0) {
     return {

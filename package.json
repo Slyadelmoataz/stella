@@ -2,6 +2,7 @@
   "name": "my-next-pwa",
   "version": "1.0.0",
   "private": true,
+  "x-ai-generated": "Some source code in this project was generated with AI assistance.",
   "scripts": {
     "dev": "next dev",
     "build": "next build",

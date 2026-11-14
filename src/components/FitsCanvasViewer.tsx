@@ -724,6 +724,7 @@ export type FitsCanvasViewerProps = {
   onCompareFrameRejected?: () => void;
   compareBuffer?: ArrayBuffer;
   showOutline?: boolean;
+  showCrosshair?: boolean;
   differenceMode?: "motion" | "brightness" | "add";
   alt?: string;
   /** Optional wavelength-resolved cube aligned to the rendered image grid. */
